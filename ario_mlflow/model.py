@@ -1,0 +1,540 @@
+"""VerifiedModel — inference wrapper with integrity checking and proof anchoring."""
+
+import json
+import logging
+import os
+import tempfile
+import threading
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from time import time
+from typing import Any
+
+import mlflow
+import numpy as np
+
+from ario_mlflow.proof import ProofEngine, canonical_json, hash_data
+from ario_mlflow.arweave import ArweaveAnchor
+from ario_mlflow.anchoring import artifact_checksums, parse_runs_uri, capture_otel_context
+
+logger = logging.getLogger(__name__)
+
+
+class IntegrityError(Exception):
+    """Raised when model artifacts fail integrity verification."""
+
+
+def _resolve_model_version(client, model_uri: str):
+    """Resolve a ``models:/`` URI to a ``ModelVersion`` using the correct MLflow API.
+
+    Supports numeric versions (``models:/name/1``), aliases
+    (``models:/name@champion``), and legacy stage URIs
+    (``models:/name/Production``). Returns the resolved ``ModelVersion`` or
+    ``None`` if the URI cannot be parsed or the registry lookup fails.
+    """
+    if not model_uri.startswith("models:/"):
+        return None
+    rest = model_uri[len("models:/"):]
+    if not rest:
+        return None
+
+    if "@" in rest:
+        name, alias = rest.split("@", 1)
+        if not name or not alias:
+            return None
+        try:
+            return client.get_model_version_by_alias(name, alias)
+        except Exception as e:  # noqa: BLE001 — any MLflow-side failure (network, missing alias, perms) → None signals "couldn't resolve"
+            logger.warning(f"Could not resolve alias {model_uri}: {e}")
+            return None
+
+    parts = rest.split("/", 1)
+    name = parts[0]
+    suffix = parts[1] if len(parts) > 1 else ""
+    if not name or not suffix:
+        return None
+
+    if suffix.isdigit():
+        try:
+            return client.get_model_version(name, suffix)
+        except Exception as e:  # noqa: BLE001 — version-by-number resolution failures → None signals "couldn't resolve"
+            logger.warning(f"Could not resolve version {model_uri}: {e}")
+            return None
+
+    # Stage URI (deprecated in MLflow 2.9+ but still supported).
+    try:
+        results = client.search_model_versions(
+            f"name='{name}' and current_stage='{suffix}'"
+        )
+    except Exception as e:  # noqa: BLE001 — stage search failures → None signals "couldn't resolve"
+        logger.warning(f"Could not resolve stage {model_uri}: {e}")
+        return None
+    if not results:
+        return None
+    # MLflow returns latest-first; take the most recent version in the stage.
+    return results[0]
+
+
+@dataclass
+class VerifiedPrediction:
+    """Result of a verified prediction, including background anchoring status.
+
+    Fields:
+        prediction: The model's output (whatever ``pyfunc.predict`` returned).
+        decision_id: UUID4 string uniquely identifying this prediction. Mirrors
+            the ``ario.decision_id`` trace tag written on the MLflow trace.
+        proof_status: One of:
+            - ``"disabled"`` — anchoring is off (no wallet / no Turbo client).
+            - ``"anchoring"`` — background upload in progress.
+            - ``"anchored"`` — uploaded successfully; ``tx_id`` is set.
+            - ``"failed"`` — upload raised; ``anchor_error`` is set.
+        record: The canonical decision record that was signed. ``None`` only
+            in exotic failure cases.
+        tx_id: Arweave transaction ID, populated after a successful anchor.
+        anchor_error: Stringified exception from the background anchor when
+            ``proof_status == "failed"``. ``None`` otherwise.
+
+    Use :meth:`wait_for_anchor` to block until the background thread
+    finishes. The underlying :class:`threading.Event` is hidden from
+    ``repr()`` and equality so it behaves like plain data otherwise.
+    """
+    prediction: Any
+    decision_id: str
+    proof_status: str  # "anchoring" | "anchored" | "disabled" | "failed"
+    record: dict | None = None
+    tx_id: str | None = None
+    anchor_error: str | None = None
+    _anchor_done: threading.Event = field(
+        default_factory=threading.Event, repr=False, compare=False
+    )
+
+    def wait_for_anchor(self, timeout: float | None = None) -> bool:
+        """Block until the background anchor completes or the timeout expires.
+
+        Args:
+            timeout: Maximum seconds to wait. ``None`` waits forever.
+
+        Returns:
+            ``True`` if the background anchor finished (check ``proof_status``,
+            ``tx_id``, and ``anchor_error`` for outcome). ``False`` if the
+            timeout expired while still ``"anchoring"``.
+
+        When anchoring is disabled (``proof_status == "disabled"``) the event
+        is already set and this returns ``True`` immediately.
+        """
+        return self._anchor_done.wait(timeout=timeout)
+
+
+class VerifiedModel:
+    """Wraps an MLflow model with integrity checking and proof anchoring on predict()."""
+
+    def __init__(
+        self,
+        model_uri: str,
+        proof_engine: ProofEngine | None = None,
+        anchor: ArweaveAnchor | None = None,
+    ):
+        """Load an MLflow model and verify its artifacts against the anchored hash.
+
+        Resolves ``model_uri`` through the MLflow registry, re-hashes the
+        model artifacts, and compares the result to the ``ario.artifact_hash``
+        tag from the source training run. The integrity check runs **before**
+        :func:`mlflow.pyfunc.load_model`, so a tampered artifact is rejected
+        before any user code (``PythonModel`` subclasses, custom loaders) can
+        execute.
+
+        Args:
+            model_uri: A ``models:/`` URI in any of these forms:
+
+                - ``models:/<name>/<version>`` — numeric version.
+                - ``models:/<name>@<alias>`` — registry alias.
+                - ``models:/<name>/<stage>`` — legacy stage URI (MLflow's
+                  ``search_model_versions`` is used; deprecated in 2.9+).
+            proof_engine: Override for the signing engine. Defaults to a
+                :class:`ProofEngine` using the process-local Ed25519 key.
+            anchor: Override for the Arweave anchor client. Defaults to an
+                :class:`ArweaveAnchor` configured from the
+                ``ARIO_MLFLOW_ARWEAVE_WALLET`` /
+                ``ARIO_MLFLOW_GATEWAY_HOST`` env vars.
+
+        Raises:
+            IntegrityError: If the re-hashed artifacts do not match the
+                ``ario.artifact_hash`` anchored at training time. The underlying
+                pyfunc model is never loaded in this case.
+        """
+        self._model_uri = model_uri
+        self._proof_engine = proof_engine or ProofEngine()
+        self._anchor = anchor or ArweaveAnchor(
+            os.environ.get("ARIO_MLFLOW_ARWEAVE_WALLET", ""),
+            os.environ.get("ARIO_MLFLOW_GATEWAY_HOST", "turbo-gateway.com"),
+        )
+
+        client = mlflow.tracking.MlflowClient()
+        self.model_name = "unknown"
+        self.model_version = "unknown"
+        self.run_id = "unknown"
+
+        # Resolve the models:/ URI via the correct MLflow registry API for each
+        # supported URI form:
+        #   models:/<name>/<numeric_version>  → get_model_version
+        #   models:/<name>@<alias>            → get_model_version_by_alias
+        #   models:/<name>/<stage>            → search_model_versions (deprecated)
+        mv = _resolve_model_version(client, model_uri)
+        if mv is not None:
+            self.model_name = mv.name
+            self.model_version = str(mv.version)
+            self.run_id = mv.run_id or "unknown"
+
+        # ModelVersion.source preserves the original artifact path from
+        # registration (e.g. "sklearn-model") — we must use it rather than
+        # hardcoding "/model".
+        load_uri = model_uri
+        artifact_path = "model"
+        if mv is not None and mv.source:
+            load_uri = mv.source
+            _src_run_id, src_artifact_path = parse_runs_uri(mv.source)
+            if src_artifact_path:
+                artifact_path = src_artifact_path
+
+        # Verify artifact integrity BEFORE loading the model. pyfunc models can
+        # execute user code during load (PythonModel subclasses, custom loaders),
+        # so a tampered artifact must be rejected before mlflow.pyfunc.load_model
+        # is given a chance to run it.
+        self._artifact_verified = None
+        if self.run_id != "unknown":
+            try:
+                run = client.get_run(self.run_id)
+                expected_hash = run.data.tags.get("ario.artifact_hash")
+                if expected_hash:
+                    checksums = artifact_checksums(self.run_id, artifact_path=artifact_path)
+                    if not checksums:
+                        logger.warning(
+                            f"Could not download artifacts for integrity check of {model_uri}; "
+                            f"treating status as unknown"
+                        )
+                    else:
+                        computed_hash = hash_data(canonical_json(checksums))
+                        if computed_hash != expected_hash:
+                            raise IntegrityError(
+                                f"Model artifact integrity check failed for {model_uri}. "
+                                f"Expected {expected_hash}, got {computed_hash}"
+                            )
+                        self._artifact_verified = True
+                        logger.info(f"Artifact integrity verified for {model_uri}")
+            except IntegrityError:
+                raise
+            except Exception as e:  # noqa: BLE001 — IntegrityError already re-raised above; everything else (mlflow access, file IO) is logged-and-skipped to avoid blocking model load
+                logger.warning(f"Could not verify artifact integrity: {e}")
+
+        # Integrity has passed (or was unverifiable with a logged warning).
+        # Only now load the model.
+        self._model = mlflow.pyfunc.load_model(load_uri)
+
+        # Per-prediction chain head: predictions chain to ario.registration_tx
+        # on the model version (read once at __init__ from the already-
+        # resolved ModelVersion; no tag write at predict time — eliminates
+        # the high-frequency busy-case race). See plan Part 3 design
+        # principle 5 and Part 4 plugin change item 2.
+        #
+        # Trade-off: tags are read from the mv resolved at __init__ time.
+        # If a registration's background anchor thread is still in flight
+        # when VerifiedModel is constructed, the tag may not be there yet
+        # and predictions for this instance chain at GENESIS. Acceptable
+        # because (a) typical workflows wait for registration before
+        # serving, (b) future VerifiedModel instances pick up the tag,
+        # and (c) the chain is reconstructable from Arweave by tag query
+        # — no proof is silently lost.
+        self._prediction_previous_hash = "GENESIS"
+        if mv is not None:
+            mv_tags = getattr(mv, "tags", None) or {}
+            reg_tx = mv_tags.get("ario.registration_tx")
+            if reg_tx:
+                self._prediction_previous_hash = reg_tx
+
+        self._lock = threading.Lock()
+
+    def _build_prediction_payload(
+        self,
+        *,
+        decision_id: str,
+        input_hash: str,
+        output_hash: str,
+        latency_ms: float,
+        mlflow_trace_id: str | None,
+        metadata: dict | None,
+    ) -> dict:
+        """Assemble the canonical payload for a prediction commitment.
+
+        Privacy-preserving by construction: contains hashes of input/output,
+        not the values themselves. PII / customer data stays in the demo
+        cache (or wherever the caller persists raw values) — the proof
+        only commits to fingerprints. See plan Part 3 (Arweave is a
+        witness, MLflow is the system of record).
+        """
+        payload: dict = {
+            "event_type": "prediction",
+            "decision_id": decision_id,
+            "model_name": self.model_name,
+            "model_version": self.model_version,
+            "run_id": self.run_id,
+            "model_uri": self._model_uri,
+            "input_hash": input_hash,
+            "output_hash": output_hash,
+            "latency_ms": round(latency_ms, 2),
+            "artifact_verified": self._artifact_verified,
+        }
+        if mlflow_trace_id:
+            payload["mlflow_trace_id"] = mlflow_trace_id
+        if metadata:
+            for k, v in metadata.items():
+                if k in payload:
+                    logger.debug(
+                        f"Caller metadata key {k!r} collides with a structural "
+                        f"field; keeping the structural value."
+                    )
+                    continue
+                payload[k] = v
+        return payload
+
+    @mlflow.trace(name="VerifiedModel.predict")
+    def predict(
+        self,
+        input_data,
+        *,
+        metadata: dict | None = None,
+        capture_otel: bool = True,
+    ) -> VerifiedPrediction:
+        """Run inference, sign a pure-commitment proof, and anchor asynchronously.
+
+        Args:
+            input_data: A dict of named features, a list/tuple of positional
+                features, or any array-like the underlying pyfunc model
+                accepts. Dicts and single-row lists are wrapped into a
+                2-D array (``[[values]]``) before passing to the model.
+            metadata: Optional dict of additional fields to commit to in
+                the canonical payload. Examples: ``{"otel_trace_id": "...",
+                "otel_span_id": "...", "service_name": "..."}`` for
+                OpenTelemetry correlation, or any other caller-shaped
+                fields. Structural fields cannot be overwritten.
+
+        Returns:
+            A :class:`VerifiedPrediction`. ``prediction`` is whatever the
+            wrapped model returned. The Arweave upload runs in a
+            background thread; callers that need ``tx_id`` immediately
+            should call :meth:`VerifiedPrediction.wait_for_anchor` before
+            reading it.
+
+        Side effects:
+            - The ``@mlflow.trace`` span is annotated with ``ario.*`` tags
+              that mirror the canonical payload (``decision_id``,
+              ``model_name``, ``model_version``, ``input_hash``,
+              ``output_hash``, ``payload_hash``, ``proof_status``,
+              ``artifact_verified``). The mirrored tags let an MLflow-UI
+              user see what was committed without downloading the
+              envelope; verifiers should still re-derive canonical bytes
+              from the source values rather than trusting the tags.
+            - If :class:`ArweaveAnchor` is enabled, the envelope (~500
+              bytes) is uploaded to Arweave in a daemon thread. Errors
+              surface on the returned object, not raised.
+        """
+        decision_id = str(uuid.uuid4())
+        start = time()
+
+        if isinstance(input_data, dict):
+            input_array = np.array([list(input_data.values())])
+        elif isinstance(input_data, (list, tuple)):
+            input_array = np.array([input_data])
+        else:
+            input_array = input_data
+
+        prediction = self._model.predict(input_array)
+        latency_ms = (time() - start) * 1000
+
+        if hasattr(prediction, 'tolist'):
+            pred_serializable = prediction.tolist()
+        else:
+            pred_serializable = prediction
+
+        input_serializable = input_data if isinstance(input_data, dict) else {"features": list(input_data) if hasattr(input_data, '__iter__') else input_data}
+        input_hash = hash_data(canonical_json(input_serializable))
+        output_hash = hash_data(canonical_json({"prediction": pred_serializable}))
+
+        # Capture MLflow trace_id (free correlation when @mlflow.trace
+        # span is active; OTel context flows in via metadata).
+        try:
+            trace_id = mlflow.get_active_trace_id()
+        except Exception:  # noqa: BLE001
+            trace_id = None
+
+        # Auto-capture OTel context when default-on. Caller-supplied
+        # metadata={"otel_trace_id": ...} wins on collision via the merge
+        # order in _build_prediction_payload.
+        auto_otel = capture_otel_context() if capture_otel else {}
+        merged_metadata = {**auto_otel, **(metadata or {})}
+
+        payload = self._build_prediction_payload(
+            decision_id=decision_id,
+            input_hash=input_hash,
+            output_hash=output_hash,
+            latency_ms=latency_ms,
+            mlflow_trace_id=trace_id,
+            metadata=merged_metadata,
+        )
+        payload_bytes = canonical_json(payload)
+        payload_hash = hash_data(payload_bytes)
+
+        # Subject identifies WHERE the verifier looks up the source data.
+        # For predictions, the canonical bytes live as an MLflow artifact
+        # on the model's source run at ario/predictions/<decision_id>/payload.json.
+        # The verifier needs (run_id, decision_id) to find that artifact;
+        # trace_id is included for observability correlation when present.
+        subject: dict = {
+            "type": "mlflow_prediction",
+            "decision_id": decision_id,
+            "model_run_id": self.run_id,
+        }
+        if trace_id:
+            subject["trace_id"] = trace_id
+
+        # All predictions for this model chain to the registration that
+        # produced it (read once at __init__). No tag write at predict
+        # time — predictions for the same model fork into a tree (one
+        # per call) which is the natural shape; the chain audit walks
+        # via Arweave tag query, not via a shared head.
+        with self._lock:
+            envelope = self._proof_engine.create_commitment(
+                event_type="prediction",
+                subject=subject,
+                payload_bytes=payload_bytes,
+                previous_hash=self._prediction_previous_hash,
+            )
+
+        # Write the canonical bytes as an MLflow artifact on the model's
+        # source run. This is the per-prediction equivalent of training's
+        # ario/payload.json — it gives the verifier an immutable witness
+        # to download for check 2 (anchored bytes intact). Trace tags
+        # (set further down) are for observability/UI display only and
+        # MUST NOT be treated as authoritative; the artifact is the
+        # source of truth.
+        if self.run_id and self.run_id != "unknown":
+            try:
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    pred_dir = os.path.join(tmpdir, "predictions", decision_id)
+                    os.makedirs(pred_dir)
+                    with open(os.path.join(pred_dir, "payload.json"), "wb") as f:
+                        f.write(payload_bytes)
+                    with open(os.path.join(pred_dir, "proof.json"), "w") as f:
+                        json.dump(envelope, f, indent=2)
+                    mlflow.log_artifacts(
+                        local_dir=os.path.dirname(os.path.dirname(pred_dir)),
+                        artifact_path="ario",
+                        run_id=self.run_id,
+                    )
+            except Exception as e:  # noqa: BLE001
+                # Artifact write failure is non-fatal — the proof is on
+                # Arweave, the signature still verifies. Check 2 won't be
+                # available for this prediction until the artifact is
+                # written. Log and continue serving.
+                logger.warning(
+                    f"Could not write ario/predictions/{decision_id}/payload.json "
+                    f"on run {self.run_id}: {e}. Prediction is still anchored to "
+                    f"Arweave and signature-verifiable; check 2 will report "
+                    f"payload_artifact_not_available."
+                )
+
+        result = VerifiedPrediction(
+            prediction=prediction,
+            decision_id=decision_id,
+            proof_status="disabled" if not self._anchor.enabled else "anchoring",
+            record=payload,  # the canonical payload is what we committed to
+        )
+        if not self._anchor.enabled:
+            result._anchor_done.set()
+
+        # Mirror the canonical payload onto the trace as ``ario.payload_json``
+        # so verify_source_of_truth has an independent MLflow surface to
+        # compare against the artifact (parallel to how training's
+        # source-of-truth check re-fetches run.data.params/metrics).
+        # The individual ario.* observability tags below are mirrors for
+        # MLflow-UI users; ario.payload_json is what verify_source_of_truth
+        # reads at audit time.
+        if trace_id:
+            try:
+                mlflow.set_trace_tag(
+                    trace_id, "ario.payload_json", payload_bytes.decode("utf-8"),
+                )
+                mlflow.set_trace_tag(trace_id, "ario.decision_id", decision_id)
+                mlflow.set_trace_tag(trace_id, "ario.model_name", self.model_name)
+                mlflow.set_trace_tag(trace_id, "ario.model_version", self.model_version)
+                mlflow.set_trace_tag(trace_id, "ario.input_hash", input_hash)
+                mlflow.set_trace_tag(trace_id, "ario.output_hash", output_hash)
+                mlflow.set_trace_tag(trace_id, "ario.payload_hash", payload_hash)
+                mlflow.set_trace_tag(trace_id, "ario.proof_status", result.proof_status)
+                if self._artifact_verified is not None:
+                    mlflow.set_trace_tag(
+                        trace_id, "ario.artifact_verified",
+                        str(self._artifact_verified).lower(),
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Failed to tag MLflow trace {trace_id}: {e}")
+
+        if self._anchor.enabled:
+            threading.Thread(
+                target=self._anchor_prediction,
+                args=(result, envelope, trace_id),
+                daemon=True,
+            ).start()
+
+        return result
+
+    def _anchor_prediction(
+        self,
+        result: VerifiedPrediction,
+        envelope: dict,
+        trace_id: str | None = None,
+    ):
+        """Background: upload prediction commitment to Arweave; update trace."""
+        try:
+            anchor_result = self._anchor.upload_proof(envelope)
+            if anchor_result:
+                result.tx_id = anchor_result["tx_id"]
+                result.proof_status = "anchored"
+                if trace_id:
+                    try:
+                        mlflow.set_trace_tag(trace_id, "ario.prediction_tx", anchor_result["tx_id"])
+                        mlflow.set_trace_tag(trace_id, "ario.arweave_url", anchor_result["url"])
+                        mlflow.set_trace_tag(trace_id, "ario.proof_status", "anchored")
+                    except Exception as e:  # noqa: BLE001
+                        logger.debug(
+                            f"Could not update trace {trace_id} with anchor tags: {e}"
+                        )
+                logger.info(
+                    f"Prediction {result.decision_id} anchored: tx={anchor_result['tx_id']}"
+                )
+            else:
+                result.proof_status = "failed"
+                result.anchor_error = "upload returned no result"
+                if trace_id:
+                    try:
+                        mlflow.set_trace_tag(trace_id, "ario.proof_status", "failed")
+                    except Exception as trace_error:  # noqa: BLE001
+                        logger.debug(
+                            f"Could not update trace {trace_id} with failed status: {trace_error}"
+                        )
+                logger.error(
+                    f"Prediction anchoring failed for {result.decision_id}: upload returned no result"
+                )
+        except Exception as e:  # noqa: BLE001
+            result.proof_status = "failed"
+            result.anchor_error = str(e)
+            if trace_id:
+                try:
+                    mlflow.set_trace_tag(trace_id, "ario.proof_status", "failed")
+                except Exception as trace_error:  # noqa: BLE001
+                    logger.debug(
+                        f"Could not update trace {trace_id} with failed status: {trace_error}"
+                    )
+            logger.error(f"Prediction anchoring failed for {result.decision_id}: {e}")
+        finally:
+            result._anchor_done.set()

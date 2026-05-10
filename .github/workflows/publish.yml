@@ -1,0 +1,56 @@
+name: publish
+
+# Triggers on a published GitHub Release. Tag the release v0.1.1, v0.2.0,
+# etc., matching the version in pyproject.toml + ario_mlflow/__init__.py.
+#
+# Requires PyPI Trusted Publishing to be configured for this repo at
+# https://pypi.org/manage/account/publishing/ (no API token needed).
+# Until then, this workflow runs but the upload step will fail loudly —
+# the build artifacts are still produced and downloadable from the run.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/ario-mlflow
+    permissions:
+      id-token: write  # required for PyPI Trusted Publishing
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
