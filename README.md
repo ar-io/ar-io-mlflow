@@ -320,7 +320,7 @@ On model versions (`ArioMlflowClient`):
 - `ario.artifact_verified` — `true` / `false` from re-hashing at registration
 - `ario.registration_tx`, `ario.promotion_tx`, `ario.arweave_url`
 
-After running `ario-mlflow verify …` (training run or model version):
+After running `ar-io-mlflow verify …` (training run or model version):
 
 - `ario.verify_status` → `verified`
 - `ario.attestation_level` — `1`, `2`, or `3` (see levels section below)
@@ -341,10 +341,10 @@ On `@mlflow.trace` spans emitted by `VerifiedModel.predict()`:
 ## CLI
 
 ```bash
-ario-mlflow verify run <run_id>                  # verify training proof
-ario-mlflow verify model <name>/<version>        # verify registration proof
-ario-mlflow verify trace <trace_id>              # verify an inference proof
-ario-mlflow audit <name>/<version>               # full model-lineage audit
+ar-io-mlflow verify run <run_id>                  # verify training proof
+ar-io-mlflow verify model <name>/<version>        # verify registration proof
+ar-io-mlflow verify trace <trace_id>              # verify an inference proof
+ar-io-mlflow audit <name>/<version>               # full model-lineage audit
 ```
 
 The CLI reads `MLFLOW_TRACKING_URI` (default `./mlruns`) — export it to point
@@ -385,7 +385,7 @@ remains verifiable.
 
 ## What the ar.io attestation means
 
-`ario-mlflow verify` reports the ar.io attestation as `Verified` or
+`ar-io-mlflow verify` reports the ar.io attestation as `Verified` or
 `Pending verification`. A proof reads `Verified` once an ar.io gateway has:
 
 1. Found it permanently stored on Arweave.
@@ -412,7 +412,7 @@ The proof envelope spec is language-neutral: an Ed25519 signature over an
 RFC-8785 (JCS) canonicalized JSON object, with a SHA-256 commitment to the
 canonical payload bytes that live as an MLflow artifact. Any RFC-8785 +
 Ed25519 + SHA-256 implementation in any language can verify a proof — no
-`ario-mlflow` install needed.
+`ar-io-mlflow` install needed.
 
 The auditor recipe:
 

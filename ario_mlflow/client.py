@@ -415,7 +415,7 @@ class ArioMlflowClient(MlflowClient):
                         envelope, result,
                         artifact_hash=expected_hash,
                         artifact_verified=artifact_verified,
-                        cli_verify_cmd=f"ario-mlflow verify model {model_name}/{version}",
+                        cli_verify_cmd=f"ar-io-mlflow verify model {model_name}/{version}",
                         wallet_mode=wallet_mode,
                     )
                     with open(os.path.join(ario_dir, "registration_verification.html"), "w") as f:

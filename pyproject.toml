@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ario-mlflow"
+name = "ar-io-mlflow"
 version = "0.1.0"
 description = "ar.io MLflow plugin — verifiable provenance for the ML lifecycle"
 readme = "README.md"
@@ -60,7 +60,7 @@ Changelog = "https://github.com/ar-io/ar-io-mlflow/blob/main/CHANGELOG.md"
 ario = "ario_mlflow.plugin:ArioContextProvider"
 
 [project.scripts]
-ario-mlflow = "ario_mlflow.cli:main"
+ar-io-mlflow = "ario_mlflow.cli:main"
 
 [tool.setuptools]
 packages = ["ario_mlflow"]

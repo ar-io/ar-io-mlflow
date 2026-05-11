@@ -184,7 +184,7 @@ class ArweaveAnchor:
 
         Baseline (always-on, derivable from the envelope, non-PII):
         - ``Content-Type``: ``application/json``
-        - ``App-Name``: ``ario-mlflow``
+        - ``App-Name``: ``ar-io-mlflow``
         - ``App-Version``: installed plugin version
         - ``Event-Type``: from envelope (``training_complete`` /
           ``model_registered`` / ``stage_transition`` / ``prediction``)
@@ -217,13 +217,13 @@ class ArweaveAnchor:
 
         try:
             from importlib.metadata import version
-            app_version = version("ario-mlflow")
+            app_version = version("ar-io-mlflow")
         except Exception:  # noqa: BLE001
             app_version = "unknown"
 
         baseline = [
             {"name": "Content-Type", "value": "application/json"},
-            {"name": "App-Name", "value": "ario-mlflow"},
+            {"name": "App-Name", "value": "ar-io-mlflow"},
             {"name": "App-Version", "value": app_version},
             {"name": "Event-Type", "value": str(event_type)},
             {"name": "Event-Id", "value": str(event_id)},

@@ -26,8 +26,8 @@ def generate_verification_html(
         verification: ar.io Verify result (from CLI verify command). Contains
             attestation_level, report_url, attested_by, attested_at.
         cli_verify_cmd: Full CLI command to print as the "verify this proof"
-            hint (e.g. ``"ario-mlflow verify run <run_id>"`` or
-            ``"ario-mlflow verify model fraud-detector/3"``). If omitted, falls
+            hint (e.g. ``"ar-io-mlflow verify run <run_id>"`` or
+            ``"ar-io-mlflow verify model fraud-detector/3"``). If omitted, falls
             back to the training-run form using ``run_id`` from the proof.
         verify_base_url: Base URL for the ar.io Verify dashboard (tx_id is
             appended). Falls back to ``ARIO_MLFLOW_ARIO_VERIFY_URL``. If
@@ -135,7 +135,7 @@ def generate_verification_html(
     verify_link = ""
     if tx_id and not verification:
         base_raw = verify_base_url or os.environ.get("ARIO_MLFLOW_ARIO_VERIFY_URL")
-        cmd = cli_verify_cmd or (f"ario-mlflow verify run {run_id}" if run_id else "ario-mlflow verify run <run_id>")
+        cmd = cli_verify_cmd or (f"ar-io-mlflow verify run {run_id}" if run_id else "ar-io-mlflow verify run <run_id>")
         if base_raw:
             verify_url = f"{base_raw.rstrip('/')}/{html.escape(tx_id)}"
             link_html = (

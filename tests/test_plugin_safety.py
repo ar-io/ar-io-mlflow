@@ -1,7 +1,7 @@
 """Tests for the plugin's safety pass: loud failure on caller-intent
 violations, no developer-URL fallback in shipped reports, version sync.
 
-These tests pin the behavior introduced when ``ario-mlflow`` was hardened
+These tests pin the behavior introduced when ``ar-io-mlflow`` was hardened
 for formal ar.io product status. The headline guarantee: if an operator
 explicitly names a wallet (via ``ARIO_MLFLOW_ARWEAVE_WALLET`` or the
 ``wallet_path`` argument), the plugin **must not** silently sign with a
@@ -125,7 +125,7 @@ def test_report_does_not_render_developer_fallback_url(monkeypatch):
 
     assert "vilenarios.com" not in html_out
     # CLI command should still appear — that part is always actionable.
-    assert "ario-mlflow verify run" in html_out
+    assert "ar-io-mlflow verify run" in html_out
 
 
 def test_report_omits_external_link_when_no_verify_url_configured(monkeypatch):

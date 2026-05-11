@@ -39,7 +39,7 @@ new tests.
 
 - The MLflow plugin itself (`ario_mlflow/`)
 - The auditor-shaped verification primitives (`verify_record`, `verify_proof_by_tx`)
-- The CLI (`ario-mlflow verify run|model|trace`, `ario-mlflow audit`)
+- The CLI (`ar-io-mlflow verify run|model|trace`, `ar-io-mlflow audit`)
 - Documentation, examples, tests for the above
 
 ## What's out of scope (here)

@@ -97,8 +97,8 @@ Three integration points for MLflow users:
 - **`ario_mlflow.VerifiedModel`** — inference (load-time integrity check + per-prediction anchoring)
 
 Plus standalone dataset anchoring via `anchor(dataset=ds)`, and the CLI:
-`ario-mlflow verify run|model|trace <id>` and
-`ario-mlflow audit <model>/<version>`.
+`ar-io-mlflow verify run|model|trace <id>` and
+`ar-io-mlflow audit <model>/<version>`.
 
 See [the README](../README.md) for usage examples and integration patterns.
 

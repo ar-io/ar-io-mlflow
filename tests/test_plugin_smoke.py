@@ -1,4 +1,4 @@
-"""Smoke tests for the ario-mlflow plugin.
+"""Smoke tests for the ar-io-mlflow plugin.
 
 Covers CodeRabbit PR #3 fixes and the S1 CLI write-back behaviours. No network
 or MLflow server required.
@@ -314,7 +314,7 @@ def test_build_default_tags_for_new_envelope_is_conservative():
     assert by_name["Event-Type"] == "training_complete"
     assert by_name["Event-Id"] == "ev-1"
     assert by_name["Chain-Prev"] == "GENESIS"
-    assert by_name["App-Name"] == "ario-mlflow"
+    assert by_name["App-Name"] == "ar-io-mlflow"
 
 
 def test_build_default_tags_supports_legacy_envelope_shape():
@@ -971,10 +971,10 @@ def test_report_verify_command_override_and_url_base():
         _minimal_proof(),
         anchor_result={"tx_id": "TX999", "url": "https://turbo-gateway.com/TX999", "receipt": None},
         artifact_hash="ab",
-        cli_verify_cmd="ario-mlflow verify model foo/1",
+        cli_verify_cmd="ar-io-mlflow verify model foo/1",
         verify_base_url="https://custom.example/verify",
     )
-    assert "ario-mlflow verify model foo/1" in html
+    assert "ar-io-mlflow verify model foo/1" in html
     assert "https://custom.example/verify/TX999" in html
     # Old hardcoded hostname must not appear when overridden.
     assert "vilenarios.com" not in html
@@ -986,7 +986,7 @@ def test_report_verify_command_fallback_uses_run_id():
         anchor_result={"tx_id": "TX5", "url": "https://turbo-gateway.com/TX5", "receipt": None},
         artifact_hash="ab",
     )
-    assert "ario-mlflow verify run run-abc" in html
+    assert "ar-io-mlflow verify run run-abc" in html
 
 
 def test_report_shows_attestation_level_when_verified():
