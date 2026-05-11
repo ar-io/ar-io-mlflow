@@ -1,4 +1,4 @@
-"""CLI: ario-mlflow verify and audit commands.
+"""CLI: ar-io-mlflow verify and audit commands.
 
 Updated for the pure-commitment redesign \u2014 runs the three-row verify
 flow (Proof Found / {Event} Record Matches / Signature Confirmed) plus an
@@ -48,7 +48,7 @@ def _glyph(symbol: str, color_code: str) -> str:
 
     Respects the NO_COLOR community standard (https://no-color.org): when
     the ``NO_COLOR`` env var is set to any non-empty value, ANSI escapes
-    are stripped \u2014 useful for piping ``ario-mlflow verify`` into log
+    are stripped \u2014 useful for piping ``ar-io-mlflow verify`` into log
     files, CI artifacts, or downstream parsers that mangle escape codes.
     Read at call time (not import time) so tests can monkeypatch the
     env var without reloading the module.
@@ -510,7 +510,7 @@ def cmd_audit(args):
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser. Exposed so tests can exercise the real wiring."""
-    parser = argparse.ArgumentParser(prog="ario-mlflow", description="ar.io MLflow verification CLI")
+    parser = argparse.ArgumentParser(prog="ar-io-mlflow", description="ar.io MLflow verification CLI")
     subparsers = parser.add_subparsers(dest="command")
 
     # verify

@@ -1,6 +1,6 @@
 """Tests for the plugin's resilience pass.
 
-Pins the network-layer behavior introduced when ``ario-mlflow`` was
+Pins the network-layer behavior introduced when ``ar-io-mlflow`` was
 hardened against transient ar.io gateway failures: retry-with-backoff
 for upload + Verify, multi-gateway fallback for fetches, and the
 attestation-level polling helper. The headline guarantee: a single

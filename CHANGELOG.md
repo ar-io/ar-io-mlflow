@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to `ario-mlflow` are documented here. The format follows
+All notable changes to `ar-io-mlflow` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
@@ -32,8 +32,8 @@ resilience pass. Not yet published to PyPI.
   independent signed event with its own Arweave TX, no MLflow run required.
   In-training calls also auto-anchor each logged dataset and reference its
   TX in the training proof.
-- **CLI** — `ario-mlflow verify run|model|trace <id>` and
-  `ario-mlflow audit <name>/<version>` for after-the-fact verification and
+- **CLI** — `ar-io-mlflow verify run|model|trace <id>` and
+  `ar-io-mlflow audit <name>/<version>` for after-the-fact verification and
   full-lineage audits.
 - **MLflow `RunContextProvider` entry point** — importing the package
   auto-tags every run with `ario.enabled` and `ario.version`.

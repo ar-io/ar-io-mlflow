@@ -45,7 +45,7 @@ TRACKING_URI = Path(__file__).parent / "mlruns-quickstart"
 
 def main() -> int:
     mlflow.set_tracking_uri(f"file://{TRACKING_URI.resolve()}")
-    mlflow.set_experiment("ario-mlflow-quickstart")
+    mlflow.set_experiment("ar-io-mlflow-quickstart")
 
     X, y = load_iris(return_X_y=True)
     X_train, X_test, y_train, y_test = train_test_split(
@@ -82,7 +82,7 @@ def main() -> int:
         # pass it through metadata. See README "Correlating with
         # OpenTelemetry" for details + opt-out.
         result = ario_mlflow.anchor(
-            metadata={"service_name": "ario-mlflow-quickstart"},
+            metadata={"service_name": "ar-io-mlflow-quickstart"},
         )
 
     print()
@@ -109,7 +109,7 @@ def main() -> int:
     print()
     print("Verify the four checks later with:")
     print(f"  MLFLOW_TRACKING_URI={TRACKING_URI.resolve()} \\")
-    print(f"  ario-mlflow verify run {run.info.run_id}")
+    print(f"  ar-io-mlflow verify run {run.info.run_id}")
     print()
     print("Open the MLflow UI to see the ario.* tags + ario/ artifacts:")
     print(f"  mlflow ui --backend-store-uri {TRACKING_URI.resolve()}")

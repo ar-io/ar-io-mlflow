@@ -1,6 +1,6 @@
 # sklearn quickstart
 
-Smallest possible example of `ario-mlflow`: train a toy sklearn model, log it
+Smallest possible example of `ar-io-mlflow`: train a toy sklearn model, log it
 to a local MLflow store, and anchor a pure-commitment proof to Arweave.
 
 ## Run
@@ -44,7 +44,7 @@ calls `ario_mlflow.anchor()`.
    - Sets `ario.training_tx`, `ario.payload_hash`, `ario.artifact_hash`
      on the run; if a registered model points to this run, sets
      `ario.last_training_hash` on it so the next training chains here.
-3. `ario-mlflow verify run <run_id>` runs the four-check verification:
+3. `ar-io-mlflow verify run <run_id>` runs the four-check verification:
    - **Signature** valid? (Ed25519 over the envelope)
    - **Anchored bytes intact?** (download `ario/payload.json`, hash,
      compare to `payload_hash`)

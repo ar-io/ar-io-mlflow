@@ -1,4 +1,4 @@
-# Putting `ario-mlflow` into production
+# Putting `ar-io-mlflow` into production
 
 The plugin is alpha — this guide covers the operational gaps the README
 doesn't go into. Read alongside [`plugin-threat-model.md`](plugin-threat-model.md)

@@ -1,11 +1,11 @@
-# `ario-mlflow` threat model
+# `ar-io-mlflow` threat model
 
 What this plugin protects against, what it doesn't, and where the trust
 boundaries actually sit. Required reading before a security review.
 
 ## TL;DR
 
-`ario-mlflow` provides **tamper-evident provenance** for the MLflow lifecycle.
+`ar-io-mlflow` provides **tamper-evident provenance** for the MLflow lifecycle.
 It commits cryptographic hashes of training/registration/inference events to
 permanent public storage (Arweave via ar.io), so any party with the proof TX
 can independently verify that what's in MLflow now matches what was anchored
@@ -189,4 +189,4 @@ The plugin **does not** require trusting:
   detectable post-anchor)
 - Any single ar.io gateway operator
 - This plugin's correctness — verification is implementable from the
-  envelope spec alone, no `ario-mlflow` install needed
+  envelope spec alone, no `ar-io-mlflow` install needed

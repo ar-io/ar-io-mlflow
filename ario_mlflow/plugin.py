@@ -6,9 +6,9 @@ from mlflow.tracking.context.abstract_context import RunContextProvider
 
 
 def _plugin_version() -> str:
-    """Resolve the installed ario-mlflow package version, or "unknown" if not installed."""
+    """Resolve the installed ar-io-mlflow package version, or "unknown" if not installed."""
     try:
-        return version("ario-mlflow")
+        return version("ar-io-mlflow")
     except PackageNotFoundError:
         return "unknown"
 
