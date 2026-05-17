@@ -109,13 +109,16 @@ def test_create_commitment_produces_minimal_envelope(tmp_path):
     expected_keys = {
         "event_id", "event_type", "subject",
         "payload_hash", "previous_hash", "signed_at",
-        "public_key", "signature",
+        "public_key", "spec_version", "signature",
     }
     assert set(env.keys()) == expected_keys
     # No source data in the envelope — only the hash.
     assert "params" not in env
     assert "metrics" not in env
     assert env["payload_hash"] == hash_data(payload)
+    # spec_version pins the envelope shape so verifiers can know what
+    # they're looking at. See test_create_commitment_emits_spec_version.
+    assert env["spec_version"] == "ario.mlflow/v1"
 
 
 def test_create_commitment_envelope_is_small(tmp_path):
@@ -279,6 +282,183 @@ def test_create_commitment_event_id_and_signed_at_overrides(tmp_path):
     )
     assert env["event_id"] == "11111111-1111-1111-1111-111111111111"
     assert env["signed_at"] == "2026-04-28T00:00:00+00:00"
+
+
+# --- spec_version: emit, legacy, unsupported, cross-product ----------------
+
+
+def test_create_commitment_emits_spec_version(tmp_path):
+    """Every plugin-minted envelope advertises ``ario.mlflow/v1``.
+
+    Pins the constant so a future spec bump is a single, intentional
+    change rather than silent drift between plugin and sister agent.
+    """
+    from ario_mlflow.proof import SPEC_VERSION
+
+    engine = ProofEngine(str(tmp_path / "priv"), str(tmp_path / "pub"))
+    env = engine.create_commitment(
+        event_type="training_complete",
+        subject={"type": "mlflow_run", "run_id": "r"},
+        payload_bytes=b"x",
+        previous_hash="GENESIS",
+    )
+    assert env["spec_version"] == "ario.mlflow/v1"
+    assert SPEC_VERSION == "ario.mlflow/v1"
+
+    # Re-verifying our own envelope must classify it as "supported"
+    # (not legacy, not unsupported) and pass overall.
+    result = engine.verify_commitment(env)
+    assert result["spec_version_status"] == "supported"
+    assert result["legacy_envelope"] is False
+    assert result["overall"] is True
+
+
+def test_verify_commitment_accepts_legacy_envelope_without_spec_version(tmp_path):
+    """Envelopes anchored before ``spec_version`` was emitted must still verify.
+
+    Anything already on Arweave from earlier builds has no
+    ``spec_version`` field. The verifier MUST treat absence as legacy
+    (continue, but flag), not as unsupported.
+    """
+    engine = ProofEngine(str(tmp_path / "priv"), str(tmp_path / "pub"))
+    payload = b"legacy-payload"
+
+    # Hand-craft a legacy-shape envelope (no spec_version field) and
+    # sign it with the engine's key. Mirrors what would have been
+    # written by a pre-spec_version build.
+    body = {
+        "event_id": "legacy-1",
+        "event_type": "training_complete",
+        "subject": {"type": "mlflow_run", "run_id": "legacy"},
+        "payload_hash": hash_data(payload),
+        "previous_hash": "GENESIS",
+        "signed_at": "2026-01-01T00:00:00+00:00",
+        "public_key": bytes(engine._vk).hex(),
+    }
+    signed = engine._sk.sign(canonical_json(body))
+    body["signature"] = signed.signature.hex()
+
+    result = engine.verify_commitment(body, payload_bytes=payload)
+    assert result["signature_valid"] is True
+    assert result["payload_hash_valid"] is True
+    assert result["spec_version_status"] == "legacy"
+    assert result["legacy_envelope"] is True
+    assert result["overall"] is True
+    assert "reason" not in result
+
+
+def test_verify_commitment_rejects_unsupported_spec_version(tmp_path):
+    """An envelope advertising an unknown spec major fails overall.
+
+    The signature itself can still be cryptographically valid (the
+    envelope is honestly signed) — but a verifier that doesn't know the
+    spec shape can't meaningfully attest to it, so overall is False.
+    """
+    engine = ProofEngine(str(tmp_path / "priv"), str(tmp_path / "pub"))
+
+    body = {
+        "event_id": "future-1",
+        "event_type": "training_complete",
+        "subject": {"type": "mlflow_run", "run_id": "r"},
+        "payload_hash": hash_data(b"x"),
+        "previous_hash": "GENESIS",
+        "signed_at": "2026-05-15T00:00:00+00:00",
+        "public_key": bytes(engine._vk).hex(),
+        "spec_version": "ario.mlflow/v99",
+    }
+    signed = engine._sk.sign(canonical_json(body))
+    body["signature"] = signed.signature.hex()
+
+    result = engine.verify_commitment(body)
+    assert result["signature_valid"] is True
+    assert result["spec_version_status"] == "unsupported"
+    assert result["legacy_envelope"] is False
+    assert result["overall"] is False
+    assert result["reason"] == "unsupported_spec_version"
+
+
+def test_verify_signature_wrapper_surfaces_spec_version_state(tmp_path):
+    """verify.verify_signature mirrors the proof-engine spec_version contract.
+
+    Confirms the wrapper propagates ``spec_version_status`` and
+    ``legacy_envelope``, and fails ``ok`` with the conventional reason
+    for unsupported majors.
+    """
+    from ario_mlflow.verify import verify_signature
+
+    engine = ProofEngine(str(tmp_path / "priv"), str(tmp_path / "pub"))
+
+    # Supported (plugin-minted).
+    env = engine.create_commitment(
+        event_type="training_complete",
+        subject={"type": "mlflow_run", "run_id": "r"},
+        payload_bytes=b"x",
+        previous_hash="GENESIS",
+    )
+    out = verify_signature(env, engine)
+    assert out["ok"] is True
+    assert out["spec_version_status"] == "supported"
+    assert out["legacy_envelope"] is False
+
+    # Unsupported.
+    bad = {
+        "event_id": "f",
+        "event_type": "training_complete",
+        "subject": {"type": "mlflow_run", "run_id": "r"},
+        "payload_hash": hash_data(b"x"),
+        "previous_hash": "GENESIS",
+        "signed_at": "2026-05-15T00:00:00+00:00",
+        "public_key": bytes(engine._vk).hex(),
+        "spec_version": "ario.future/v1",
+    }
+    bad["signature"] = engine._sk.sign(canonical_json(bad)).signature.hex()
+    out = verify_signature(bad, engine)
+    assert out["ok"] is False
+    assert out["signature_valid"] is True
+    assert out["spec_version_status"] == "unsupported"
+    assert out["reason"] == "unsupported_spec_version"
+
+
+def test_verify_commitment_accepts_cross_product_agent_envelope(tmp_path):
+    """Plugin verifies envelopes minted by the sister ar-io-agent (Go daemon).
+
+    Loads a real ``ario.agent/v1`` envelope from
+    ``tests/fixtures/agent-envelope-asset-registered-01.json`` (a copy
+    of the agent's canonical test vector, signed with a fixed test
+    seed). Confirms the plugin and agent interoperate bidirectionally
+    — symmetry with the agent's own test that verifies plugin
+    envelopes.
+    """
+    from nacl.signing import VerifyKey
+
+    vector_path = Path(__file__).parent / "fixtures" / "agent-envelope-asset-registered-01.json"
+    vector = json.loads(vector_path.read_text())
+
+    # Reconstruct the full signed envelope from the vector. The vector
+    # stores the pre-signature body with ``public_key`` and
+    # ``payload_hash`` omitted; the signer fills both in before
+    # canonicalizing. The signed-bytes hex in expected_outputs confirms
+    # both fields are present in the actual signed body.
+    envelope = dict(vector["inputs"]["envelope_pre_signature"])
+    envelope["public_key"] = vector["fixed_keypair"]["ed25519_public_hex"]
+    envelope["payload_hash"] = vector["expected_outputs"]["payload_hash_hex"]
+    envelope["signature"] = vector["expected_outputs"]["signature_hex"]
+
+    # Sanity-check: the embedded public key actually verifies the
+    # vector's signature over the published canonical bytes. If this
+    # fails, the fixture itself is bad — the spec_version check below
+    # would be running against a broken envelope.
+    VerifyKey(bytes.fromhex(envelope["public_key"])).verify(
+        bytes.fromhex(vector["expected_outputs"]["envelope_for_sig_jcs_bytes_hex"]),
+        bytes.fromhex(envelope["signature"]),
+    )
+
+    engine = ProofEngine(str(tmp_path / "priv"), str(tmp_path / "pub"))
+    result = engine.verify_commitment(envelope)
+    assert result["signature_valid"] is True, result
+    assert result["spec_version_status"] == "supported"
+    assert result["legacy_envelope"] is False
+    assert result["overall"] is True
 
 
 # --- ArweaveAnchor wallet fallbacks (CodeRabbit #1) -----------------------

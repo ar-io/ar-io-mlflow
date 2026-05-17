@@ -11,6 +11,44 @@ import jcs
 from nacl.signing import SigningKey, VerifyKey
 
 
+# Envelope spec version this build emits. Bumped when the signed-body
+# shape changes in a way that requires verifiers to know the new shape.
+SPEC_VERSION = "ario.mlflow/v1"
+
+# Spec versions this build *accepts* during verification. Includes the
+# sister agent's major (``ario.agent/v1``) so plugin verifiers can check
+# envelopes minted by ar-io-agent — the two share envelope spec + crypto.
+# A future spec bump adds the new major here; old verifiers that don't
+# know it return ``unsupported_spec_version`` and refuse to verify.
+ACCEPTED_SPEC_VERSIONS = frozenset({
+    "ario.mlflow/v1",
+    "ario.agent/v1",
+})
+
+
+def _classify_spec_version(envelope: dict) -> tuple[str, str | None]:
+    """Classify an envelope's ``spec_version`` field.
+
+    Returns ``(status, reason)`` where ``status`` is one of:
+
+    - ``"supported"`` — present and in :data:`ACCEPTED_SPEC_VERSIONS`.
+    - ``"legacy"`` — field absent. Envelopes anchored before this build
+      had no ``spec_version`` field. They MUST still verify; callers
+      surface ``legacy_envelope=True`` so consumers can distinguish.
+    - ``"unsupported"`` — present but not in the accepted set. The
+      envelope advertises a spec this build doesn't know how to verify.
+
+    ``reason`` is set to ``"unsupported_spec_version"`` only for the
+    unsupported case; otherwise ``None``.
+    """
+    version = envelope.get("spec_version")
+    if version is None:
+        return ("legacy", None)
+    if version in ACCEPTED_SPEC_VERSIONS:
+        return ("supported", None)
+    return ("unsupported", "unsupported_spec_version")
+
+
 def normalize_floats(obj, precision=6):
     """Recursively round floats. Use BEFORE canonical_json when hashing values
     that may differ at floating-point precision across measurements (e.g.
@@ -158,6 +196,7 @@ class ProofEngine:
             "previous_hash": previous_hash,
             "signed_at": signed_at or datetime.now(timezone.utc).isoformat(),
             "public_key": bytes(self._vk).hex(),
+            "spec_version": SPEC_VERSION,
         }
         signed = self._sk.sign(canonical_json(envelope))
         envelope["signature"] = signed.signature.hex()
@@ -184,10 +223,16 @@ class ProofEngine:
         Returns:
             ``signature_valid`` (bool); ``payload_hash_valid`` (bool or
             ``None`` when not checked); ``computed_payload_hash`` (str
-            or ``None``); ``stored_payload_hash`` (str); ``overall``
-            (bool — ``True`` only when signature valid *and* hash valid
-            if checked).
+            or ``None``); ``stored_payload_hash`` (str);
+            ``spec_version_status`` (one of ``"supported"``,
+            ``"legacy"``, ``"unsupported"``); ``legacy_envelope`` (bool
+            — true when the envelope predates the ``spec_version``
+            field); ``overall`` (bool — ``True`` only when signature
+            valid *and* hash valid if checked *and* spec is not
+            unsupported); ``reason`` (only set when spec is
+            unsupported).
         """
+        spec_status, spec_reason = _classify_spec_version(envelope)
         sig_valid = False
         try:
             # Reconstruct the signed body. Strip:
@@ -216,14 +261,25 @@ class ProofEngine:
             payload_hash_valid = computed_hash == envelope.get("payload_hash")
 
         # overall is True only if signature is valid AND (payload not
-        # checked OR payload check passed). A failed payload check is a
-        # hard fail; an unchecked payload is a soft pass.
-        overall = sig_valid and (payload_hash_valid is not False)
+        # checked OR payload check passed) AND the spec_version is not
+        # explicitly unsupported. Absent (legacy) and supported both
+        # pass; only an envelope that advertises a spec major this
+        # build doesn't know about is a hard fail.
+        overall = (
+            sig_valid
+            and (payload_hash_valid is not False)
+            and spec_status != "unsupported"
+        )
 
-        return {
+        result = {
             "signature_valid": sig_valid,
             "payload_hash_valid": payload_hash_valid,
             "computed_payload_hash": computed_hash,
             "stored_payload_hash": envelope.get("payload_hash"),
+            "spec_version_status": spec_status,
+            "legacy_envelope": spec_status == "legacy",
             "overall": overall,
         }
+        if spec_reason is not None:
+            result["reason"] = spec_reason
+        return result
