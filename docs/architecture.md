@@ -12,6 +12,7 @@ Each lifecycle event produces a small signed envelope that goes on Arweave:
 
 ```json
 {
+  "spec_version": "ario.mlflow/v1",
   "event_id": "uuid",
   "event_type": "training_complete | model_registered | prediction",
   "subject": {"type": "mlflow_run", "run_id": "..."},
@@ -24,6 +25,15 @@ Each lifecycle event produces a small signed envelope that goes on Arweave:
 ```
 
 The envelope is bounded 400–700 bytes. No source data goes on chain.
+
+`spec_version` pins the envelope shape. Verifiers accept the plugin's
+own major (`ario.mlflow/v1`) and the sister
+[`ar-io-agent`](https://github.com/ar-io/ar-io-agent) daemon's major
+(`ario.agent/v1`) — the two share envelope spec + crypto and verify
+each other's records. Envelopes anchored before this field was added
+have no `spec_version` and continue to verify normally (verifiers flag
+them as legacy). Envelopes carrying an unknown major fail verification
+with `reason: "unsupported_spec_version"`.
 
 ### Canonical bytes preserved in MLflow
 

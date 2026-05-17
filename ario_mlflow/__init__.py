@@ -34,6 +34,9 @@ __version__ = "0.1.0"
 
 
 def __getattr__(name):
+    if name == "SPEC_VERSION":
+        from ario_mlflow.proof import SPEC_VERSION
+        return SPEC_VERSION
     if name == "anchor":
         from ario_mlflow.anchoring import anchor
         return anchor
@@ -66,6 +69,7 @@ def __getattr__(name):
 
 __all__ = [
     "__version__",
+    "SPEC_VERSION",
     "anchor",
     "VerifiedModel",
     "IntegrityError",

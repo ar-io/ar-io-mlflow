@@ -9,6 +9,28 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Active development. Not yet published to PyPI; install from source via
 `pip install -e .`.
 
+### Added
+
+- **`spec_version` field on signed envelopes** — every envelope minted by
+  `create_commitment()` now carries `spec_version: "ario.mlflow/v1"` as
+  part of the signed body. Pins the envelope shape so a future spec bump
+  can roll out via the same field. Exported as `ario_mlflow.SPEC_VERSION`.
+- **Cross-product spec acceptance** — `verify_commitment()` and
+  `verify_signature()` accept envelopes minted by the sister
+  [`ar-io-agent`](https://github.com/ar-io/ar-io-agent) daemon
+  (`ario.agent/v1`) alongside plugin envelopes (`ario.mlflow/v1`). The
+  two share the envelope spec + Ed25519/JCS crypto and now verify each
+  other's records bidirectionally.
+
+### Changed
+
+- **Verifier results expose `spec_version_status` and `legacy_envelope`**
+  — `ProofEngine.verify_commitment()` and `verify.verify_signature()`
+  now report whether the envelope's `spec_version` is `"supported"`,
+  `"legacy"` (field absent — envelopes anchored before this build
+  continue to verify normally), or `"unsupported"` (unknown major —
+  `overall` is `False` with `reason="unsupported_spec_version"`).
+
 ## [0.1.0] — 2026
 
 Initial alpha — covers the three integration points, dataset anchoring, the

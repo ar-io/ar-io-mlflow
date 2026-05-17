@@ -458,12 +458,29 @@ def verify_signature(envelope: dict, proof_engine: ProofEngine) -> dict:
     Wraps :meth:`ProofEngine.verify_commitment` (without payload bytes —
     that's check 2). Returns ``{ok: bool, ...}`` for uniform composition
     with the other checks.
+
+    An envelope advertising an unsupported ``spec_version`` major fails
+    with ``ok=False, reason="unsupported_spec_version"`` regardless of
+    whether the signature itself is well-formed — the verifier doesn't
+    know what shape the envelope is supposed to have, so it can't
+    meaningfully attest to it. Legacy envelopes (no ``spec_version``
+    field, anchored before this build) verify normally; callers see
+    ``legacy_envelope=True`` so they can surface that distinction.
     """
     result = proof_engine.verify_commitment(envelope)
-    return {
-        "ok": result["signature_valid"],
-        "signature_valid": result["signature_valid"],
+    spec_status = result.get("spec_version_status", "supported")
+    legacy = result.get("legacy_envelope", False)
+    sig_valid = result["signature_valid"]
+
+    out = {
+        "ok": sig_valid and spec_status != "unsupported",
+        "signature_valid": sig_valid,
+        "spec_version_status": spec_status,
+        "legacy_envelope": legacy,
     }
+    if spec_status == "unsupported":
+        out["reason"] = "unsupported_spec_version"
+    return out
 
 
 def verify_anchored_bytes(envelope: dict, mlflow_client) -> dict:
