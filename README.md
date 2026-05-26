@@ -344,8 +344,12 @@ On `@mlflow.trace` spans emitted by `VerifiedModel.predict()`:
 ar-io-mlflow verify run <run_id>                  # verify training proof
 ar-io-mlflow verify model <name>/<version>        # verify registration proof
 ar-io-mlflow verify trace <trace_id>              # verify an inference proof
-ar-io-mlflow audit <name>/<version>               # full model-lineage audit
+ar-io-mlflow audit <name>/<version>               # full model-lineage audit (terminal)
+ar-io-mlflow audit <name>/<version> --format=json # machine-readable evidence bundle
+ar-io-mlflow audit <name>/<version> --format=json --output lineage.json
 ```
+
+`audit --format=json` emits an `ario.mlflow.audit/v1` evidence bundle — training → registration → promotion → artifact-integrity, each with per-check results and an `overall_ok` — for SOC2 / ISO 27001 evidence. It's the model-lineage parallel to the agent's `ariod audit export`. JSON mode is pipe-clean (no terminal panel); `--output` writes to a file.
 
 The CLI reads `MLFLOW_TRACKING_URI` (default `./mlruns`) — export it to point
 at the same store you used at training time, otherwise the run lookup will

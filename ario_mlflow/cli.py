@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import tempfile
+from datetime import datetime, timezone
 
 import mlflow
 
@@ -29,6 +30,11 @@ from ario_mlflow.verify import (
     _compute_overall_ok,
 )
 from ario_mlflow.report import generate_verification_html
+
+
+def _utc_now_iso() -> str:
+    """RFC 3339 UTC timestamp for audit-bundle generated_at."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _get_components():
@@ -204,6 +210,7 @@ def _verify_envelope_for_tx(
     ario_client: ArioVerifyClient,
     mlflow_client,
     record_label: str = "Record Matches",
+    quiet: bool = False,
 ) -> tuple[dict, bool]:
     """Fetch an envelope from ar.io and run the verify checks.
 
@@ -215,10 +222,15 @@ def _verify_envelope_for_tx(
     ``record_label`` controls the row-2 label in the printed panel
     ("Decision Record Matches" / "Training Record Matches" /
     "Registration Record Matches"). Internal field names are unchanged.
+
+    ``quiet`` suppresses the printed check panel — used by the
+    machine-readable audit export (``audit --format=json``) which
+    collects the structured result instead of rendering a terminal panel.
     """
     envelope = anchor.fetch_proof(tx_id)
     if not envelope:
-        print(f"  Could not fetch envelope from ar.io for TX {tx_id}.")
+        if not quiet:
+            print(f"  Could not fetch envelope from ar.io for TX {tx_id}.")
         return {}, False
 
     sig = verify_signature(envelope, proof_engine)
@@ -234,7 +246,8 @@ def _verify_envelope_for_tx(
     envelope_with_tx["_tx_id"] = tx_id
     ario_result = verify_ario_attestation(envelope_with_tx, ario_client)
 
-    _print_four_checks(sig, bytes_check, sot, ario_result, record_label=record_label)
+    if not quiet:
+        _print_four_checks(sig, bytes_check, sot, ario_result, record_label=record_label)
 
     # Use the shared overall-ok logic so CLI and full_verify() agree.
     # For training/registration envelopes, ok=None on signature /
@@ -425,8 +438,34 @@ def cmd_verify_trace(args):
     return 0 if ok else 1
 
 
+AUDIT_EXPORT_SCHEMA = "ario.mlflow.audit/v1"
+
+
+def _stage_check_summary(combined: dict) -> dict:
+    """Reduce a _verify_envelope_for_tx combined result to JSON-safe
+    check booleans/strings (drops payload bytes + envelope blob)."""
+    def one(c: dict | None) -> dict:
+        if not c:
+            return {"ok": None}
+        return {"ok": c.get("ok"), "reason": c.get("reason", "")}
+    return {
+        "signature": one(combined.get("signature")),
+        "anchored_bytes": one(combined.get("anchored_bytes")),
+        "source_of_truth": one(combined.get("source_of_truth")),
+        "ario_attestation": one(combined.get("ario_attestation")),
+    }
+
+
 def cmd_audit(args):
-    """Audit the full lineage (training → registration → promotion) for a model version."""
+    """Audit the full lineage (training → registration → promotion) for a model version.
+
+    Default output is the human-readable terminal panel. ``--format=json``
+    emits a structured ``ario.mlflow.audit/v1`` bundle (parallel to
+    ariod's ``audit export``) for SOC2/ISO27001 evidence — written to
+    ``--output`` if given, else stdout. In JSON mode no terminal panel
+    is rendered, so the output is pipe-clean.
+    """
+    json_mode = getattr(args, "format", "text") == "json"
     proof_engine, anchor, ario_client = _get_components()
     client = mlflow.tracking.MlflowClient()
 
@@ -434,11 +473,35 @@ def cmd_audit(args):
     name = parts[0]
     version = parts[1] if len(parts) > 1 else "1"
 
-    print(f"Auditing model lineage: {name}/v{version}")
-    print("=" * 50)
+    def emit(msg: str = ""):
+        if not json_mode:
+            print(msg)
+
+    emit(f"Auditing model lineage: {name}/v{version}")
+    emit("=" * 50)
 
     mv = client.get_model_version(name, version)
     all_ok = True
+    stages: list[dict] = []
+
+    def run_stage(stage_name: str, context: str, tx_id: str | None, label: str):
+        nonlocal all_ok
+        emit(f"\n{context}:")
+        rec = {"stage": stage_name, "tx_id": tx_id, "anchored": bool(tx_id)}
+        if tx_id:
+            combined, ok = _verify_envelope_for_tx(
+                tx_id, proof_engine, anchor, ario_client, client,
+                record_label=label, quiet=json_mode,
+            )
+            rec["checks"] = _stage_check_summary(combined)
+            rec["ok"] = ok
+            if not ok:
+                all_ok = False
+        else:
+            emit("  Not anchored.")
+            rec["checks"] = None
+            rec["ok"] = None
+        stages.append(rec)
 
     # 1. Training
     training_tx = None
@@ -448,43 +511,13 @@ def cmd_audit(args):
             training_tx = run.data.tags.get("ario.training_tx")
         except Exception:  # noqa: BLE001 — audit display: training_tx is best-effort; missing tag/run renders as "unknown" without aborting the audit
             pass
-
-    print(f"\nTraining (run {mv.run_id or 'unknown'}):")
-    if training_tx:
-        _, ok = _verify_envelope_for_tx(
-            training_tx, proof_engine, anchor, ario_client, client,
-            record_label="Training Record Matches",
-        )
-        if not ok:
-            all_ok = False
-    else:
-        print("  Not anchored.")
+    run_stage("training", f"Training (run {mv.run_id or 'unknown'})", training_tx, "Training Record Matches")
 
     # 2. Registration
-    registration_tx = mv.tags.get("ario.registration_tx")
-    print(f"\nRegistration (v{version}):")
-    if registration_tx:
-        _, ok = _verify_envelope_for_tx(
-            registration_tx, proof_engine, anchor, ario_client, client,
-            record_label="Registration Record Matches",
-        )
-        if not ok:
-            all_ok = False
-    else:
-        print("  Not anchored.")
+    run_stage("registration", f"Registration (v{version})", mv.tags.get("ario.registration_tx"), "Registration Record Matches")
 
     # 3. Promotion
-    promotion_tx = mv.tags.get("ario.promotion_tx")
-    print(f"\nPromotion ({mv.current_stage}):")
-    if promotion_tx:
-        _, ok = _verify_envelope_for_tx(
-            promotion_tx, proof_engine, anchor, ario_client, client,
-            record_label="Registration Record Matches",
-        )
-        if not ok:
-            all_ok = False
-    else:
-        print("  Not anchored.")
+    run_stage("promotion", f"Promotion ({mv.current_stage})", mv.tags.get("ario.promotion_tx"), "Registration Record Matches")
 
     # 4. Artifact integrity
     artifact_hash = None
@@ -495,11 +528,34 @@ def cmd_audit(args):
         except Exception:  # noqa: BLE001 — audit display: artifact_hash is best-effort; failure renders as "unknown" without aborting
             pass
 
-    print(f"\nArtifact integrity:")
+    emit("\nArtifact integrity:")
     if artifact_hash:
-        print(f"  Anchored hash: {artifact_hash[:24]}...")
+        emit(f"  Anchored hash: {artifact_hash[:24]}...")
     else:
-        print("  No artifact hash recorded.")
+        emit("  No artifact hash recorded.")
+
+    if json_mode:
+        bundle = {
+            "schema": AUDIT_EXPORT_SCHEMA,
+            "model": name,
+            "version": version,
+            "generated_at": _utc_now_iso(),
+            "tracking_uri": os.environ.get("MLFLOW_TRACKING_URI", "./mlruns"),
+            "run_id": mv.run_id or None,
+            "current_stage": mv.current_stage,
+            "artifact_hash": artifact_hash,
+            "stages": stages,
+            "overall_ok": all_ok,
+        }
+        payload = json.dumps(bundle, indent=2)
+        output = getattr(args, "output", None)
+        if output:
+            with open(output, "w", encoding="utf-8") as f:
+                f.write(payload + "\n")
+            print(f"audit bundle written to {output} ({len(stages)} stages, overall_ok={all_ok})")
+        else:
+            print(payload)
+        return 0 if all_ok else 1
 
     print(f"\n{'=' * 50}")
     check = _check_glyph()
@@ -529,6 +585,15 @@ def build_parser() -> argparse.ArgumentParser:
     # audit
     audit_parser = subparsers.add_parser("audit", help="Audit full model lineage (training → registration → promotion)")
     audit_parser.add_argument("model", help="Model name/version (e.g. fraud-detector/3)")
+    audit_parser.add_argument(
+        "--format", choices=["text", "json"], default="text",
+        help="Output format. 'text' (default) renders the terminal panel; "
+             "'json' emits a structured ario.mlflow.audit/v1 evidence bundle.",
+    )
+    audit_parser.add_argument(
+        "--output", default=None,
+        help="With --format=json, write the bundle to this path instead of stdout.",
+    )
 
     return parser
 

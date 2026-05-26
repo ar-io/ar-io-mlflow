@@ -11,6 +11,15 @@ Active development. Not yet published to PyPI; install from source via
 
 ### Added
 
+- **`ar-io-mlflow audit <model> --format=json [--output <path>]`** — the
+  model-lineage audit now emits a machine-readable evidence bundle
+  (`ario.mlflow.audit/v1`), parallel to the agent's `ariod audit export`.
+  Brings the two repos to reporting parity: a compliance team can now pull
+  a structured lineage artifact (training → registration → promotion →
+  artifact integrity, each with per-check results) for SOC2/ISO27001
+  evidence, not just a terminal screenshot. JSON mode is pipe-clean (no
+  panel rendered to stdout); `--output` writes to a file. Default remains
+  the human-readable terminal panel — `text` mode is byte-unchanged.
 - **`spec_version` field on signed envelopes** — every envelope minted by
   `create_commitment()` now carries `spec_version: "ario.mlflow/v1"` as
   part of the signed body. Pins the envelope shape so a future spec bump
