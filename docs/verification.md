@@ -166,6 +166,47 @@ Result shape:
 }
 ```
 
+### Prediction: verify a per-inference proof
+
+`VerifiedModel.predict` anchors each prediction on a background thread and
+returns a `VerifiedPrediction` carrying the proof's `tx_id`. Verify it like
+any other event once the anchor lands:
+
+```python
+from mlflow.tracking import MlflowClient
+from ario_mlflow import VerifiedModel, verify_proof_by_tx
+
+model = VerifiedModel("models:/fraud-detector@champion")
+pred = model.predict(features)
+
+pred.wait_for_anchor()                      # block until the background anchor finishes
+if pred.proof_status == "anchored":
+    result = verify_proof_by_tx(
+        pred.tx_id,
+        anchor=anchor,
+        proof_engine=proof_engine,
+        mlflow_client=MlflowClient(),
+    )
+    assert result["overall"] is True
+```
+
+To verify a prediction anchored earlier (you don't have the result object
+in hand), read its TX from the MLflow **trace** — the prediction proof's TX
+lives on the trace as the `ario.prediction_tx` tag, which is the same path
+the CLI's `ar-io-mlflow verify trace <trace_id>` takes:
+
+```python
+import mlflow
+trace = mlflow.get_trace(trace_id)
+tx_id = trace.info.tags["ario.prediction_tx"]   # then verify_proof_by_tx(tx_id, …)
+```
+
+> Check 3 for a prediction re-derives the canonical bytes from the trace's
+> `ario.payload_json` tag, so it needs the trace to still exist. If a
+> retention policy pruned it, `source_of_truth` reports
+> `reason="live_refetch_incomplete"` rather than silently passing — the
+> signature + anchored-bytes layers remain verifiable regardless.
+
 ### Gotcha: `full_verify` / `verify_proof_by_tx` without an MLflow client
 
 For training, registration, and prediction events, checks 2 and 3 are
