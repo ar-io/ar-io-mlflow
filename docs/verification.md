@@ -87,18 +87,23 @@ ario_client = ArioVerifyClient()                   # optional; check 4. Disabled
 
 ### Operator: verify by TX ID (the common case)
 
-You have a TX ID from an MLflow tag (`ario.training_tx`, etc.) and want the
-full picture:
+You have a TX ID from an MLflow tag and want the full picture. The plugin
+records the TX on the run/version under `ario.training_tx`,
+`ario.registration_tx`, or `ario.promotion_tx` (see the README's
+[Tags the plugin writes](../README.md#tags-the-plugin-writes)):
 
 ```python
 from mlflow.tracking import MlflowClient
 from ario_mlflow import verify_proof_by_tx
 
+client = MlflowClient()
+tx_id = client.get_run(run_id).data.tags["ario.training_tx"]
+
 result = verify_proof_by_tx(
     tx_id,
     anchor=anchor,
     proof_engine=proof_engine,
-    mlflow_client=MlflowClient(),      # enables checks 2 and 3
+    mlflow_client=client,              # enables checks 2 and 3
     ario_client=ario_client,           # enables check 4 (optional)
 )
 
@@ -120,15 +125,22 @@ if result["overall"] is not True:
   "source_of_truth": {"ok": True, "rebuilt_bytes": b"…",
                       "live_fields_refetched": ["artifact_checksums", "git_commit",
                                                 "metrics", "params", "source_name"]},
-  "ario_attestation":{"ok": None, "reason": "no_ario_client"},   # or level details
+  "ario_attestation":{"ok": None, "reason": "ario_verify_not_enabled"},  # see note
   "overall": True,
 }
 ```
 
+> The `ario_attestation` reason depends on the client: omitting `ario_client`
+> entirely gives `"no_ario_client"`; passing one that's disabled (no
+> `ARIO_MLFLOW_ARIO_VERIFY_URL`) gives `"ario_verify_not_enabled"`; an
+> enabled client returns `attestation_level` + report details instead.
+
 ### Auditor: verify a portable bundle offline
 
 No MLflow, no operator infra — just the envelope and the canonical bytes it
-committed to (e.g. shipped together in an evidence bundle):
+committed to. The canonical bytes are exactly the raw contents of the
+`ario/payload.json` artifact (shipped alongside the envelope in an evidence
+bundle):
 
 ```python
 from ario_mlflow import verify_record
@@ -164,10 +176,10 @@ fail. So calling the operator functions without an `mlflow_client` returns
 ```python
 from ario_mlflow import full_verify
 
-full_verify(env, proof_engine=proof_engine)["overall"]
+full_verify(envelope, proof_engine=proof_engine)["overall"]
 # -> False   (anchored_bytes.ok == None -> required check didn't run)
 
-full_verify(env, proof_engine=proof_engine, mlflow_client=MlflowClient())["overall"]
+full_verify(envelope, proof_engine=proof_engine, mlflow_client=MlflowClient())["overall"]
 # -> True
 ```
 
