@@ -31,6 +31,21 @@ Active development. Not yet published to PyPI; install from source via
   continue to verify normally), or `"unsupported"` (unknown major —
   `overall` is `False` with `reason="unsupported_spec_version"`).
 
+### Documentation
+
+- **New [`docs/verification.md`](docs/verification.md)** — full
+  verification reference: the four checks and their tri-state (`True` /
+  `False` / `None`) result semantics, the programmatic API
+  (`verify_record` / `verify_proof_by_tx` / `full_verify`) with a
+  when-to-use table and examples, per-event-type nuances, the
+  `ario/verification.html` report, `spec_version` / cross-product
+  handling, and a copy-paste CI/monitoring job.
+- **README "Programmatic verification" section** — documents the three
+  composite verify functions, the tri-state result contract (incl. the
+  "required MLflow checks fail `overall` when no client is supplied"
+  gotcha), and agent cross-product verification. The "Verifying without
+  Python" auditor recipe now includes a `spec_version` check.
+
 ## [0.1.0] — 2026
 
 Initial alpha — covers the three integration points, dataset anchoring, the

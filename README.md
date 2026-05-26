@@ -383,6 +383,52 @@ If an MLflow retention policy has pruned a prediction's trace, row 2 returns
 itself (signature + anchored bytes + ar.io) is on permanent storage and
 remains verifiable.
 
+## Programmatic verification
+
+When you want to verify inside your own code — a CI gate, a scheduled
+re-verification job, an auditor script — call the verify functions directly
+instead of shelling out to the CLI. Three composite entry points, all
+re-exported from the top-level `ario_mlflow` package; pick based on what you
+hold and whether you have MLflow access:
+
+| Function | Use when | MLflow access | Runs the live-MLflow check? |
+|----------|----------|:---:|:---:|
+| `verify_record(envelope, canonical_bytes, …)` | **Auditor** with a portable bundle (envelope + canonical bytes), no operator infra | no | no |
+| `verify_proof_by_tx(tx_id, …)` | **Operator** with only a TX ID — fetches the envelope from Arweave, then verifies | optional | yes |
+| `full_verify(envelope, …)` | **Operator** already holding the envelope | optional | yes |
+
+```python
+from mlflow.tracking import MlflowClient
+from ario_mlflow import verify_proof_by_tx
+from ario_mlflow.proof import ProofEngine        # not a top-level export
+from ario_mlflow.arweave import ArweaveAnchor    # not a top-level export
+
+result = verify_proof_by_tx(
+    tx_id,                                # e.g. from the ario.training_tx tag
+    anchor=ArweaveAnchor("", "turbo-gateway.com"),
+    proof_engine=ProofEngine(),
+    mlflow_client=MlflowClient(),         # enables the anchored-bytes + live checks
+)
+assert result["proof_found"] and result["overall"] is True
+```
+
+**Read results carefully — `ok` is tri-state.** Each check reports
+`ok=True` (passed), `ok=False` (ran and failed), or `ok=None` (didn't run /
+not applicable, with a `reason`). One sharp edge: for training, registration,
+and prediction events the MLflow checks are *required*, so calling
+`full_verify` / `verify_proof_by_tx` **without** an `mlflow_client` returns
+`overall=False` even on a valid signature — a missing check can't read as a
+pass. For a deliberate offline/signature-only verdict, use `verify_record`
+(auditor semantics) or inspect `result["signature"]["ok"]`.
+
+The plugin also verifies envelopes minted by the sister
+[`ar-io-agent`](https://github.com/ar-io/ar-io-agent) daemon
+(`ario.agent/v1`) — the two share the envelope spec and crypto.
+
+See [`docs/verification.md`](docs/verification.md) for the full reference:
+every result field, per-event-type nuances, the `ario/verification.html`
+report, `spec_version` handling, and a copy-paste CI/monitoring job.
+
 ## What the ar.io attestation means
 
 `ar-io-mlflow verify` reports the ar.io attestation as `Verified` or
@@ -423,7 +469,11 @@ The auditor recipe:
 3. **Re-hash the canonical payload.** Download `ario/payload.json` from the
    MLflow run's artifacts. Compute SHA-256 of the raw bytes. Compare to the
    envelope's `payload_hash`.
-4. **Walk the chain** (optional). Each envelope's `previous_hash` is the
+4. **Check `spec_version`.** Accept the `ario.mlflow/v*` / `ario.agent/v*`
+   majors you understand and reject unknown ones. Envelopes anchored before
+   this field existed have no `spec_version` and still verify (legacy) — see
+   [`docs/architecture.md`](docs/architecture.md#pure-commitment-proofs-500-bytes-on-arweave).
+5. **Walk the chain** (optional). Each envelope's `previous_hash` is the
    prior anchor's `payload_hash` for that event type, or `"GENESIS"`.
    Fetch the predecessor by its TX (recorded in the relevant tag,
    e.g. `ario.last_training_hash`) and recurse.
@@ -446,6 +496,7 @@ No network or MLflow server required.
 ## Related docs
 
 - [`CHANGELOG.md`](CHANGELOG.md) — release history and known limitations.
+- [`docs/verification.md`](docs/verification.md) — full verification reference: the four checks, the programmatic API, result shapes, the HTML report, and a CI/monitoring recipe.
 - [`docs/architecture.md`](docs/architecture.md) — system design (pure-commitment proofs, per-event chains, JCS canonicalization).
 - [`docs/plugin-production.md`](docs/plugin-production.md) — production deployment guide: wallet ops, CI/CD patterns, monitoring, runbooks.
 - [`docs/plugin-threat-model.md`](docs/plugin-threat-model.md) — what the plugin defends against, what it doesn't, trust boundaries.
