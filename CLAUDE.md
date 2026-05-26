@@ -25,10 +25,14 @@ pytest -v --tb=short                                # what CI runs (.github/work
 ar-io-mlflow verify run <run_id>
 ar-io-mlflow verify model <name>/<version>
 ar-io-mlflow verify trace <trace_id>
-ar-io-mlflow audit <name>/<version>
+ar-io-mlflow audit <name>/<version>                       # human-readable terminal panel
+ar-io-mlflow audit <name>/<version> --format=json         # machine-readable bundle to stdout
+ar-io-mlflow audit <name>/<version> --format=json --output bundle.json
 ```
 
 The CLI reads `MLFLOW_TRACKING_URI` (default `./mlruns`). Export it to match the store used at training time, or the run lookup fails.
+
+`audit --format=json` emits an `ario.mlflow.audit/v1` evidence bundle (model + version + per-stage tx/checks/ok + artifact_hash + overall_ok), the lineage parallel to the agent's `ariod audit export`. JSON mode suppresses the terminal panel so stdout is pipe-clean; `--output` writes to a file. `text` mode (default) is unchanged.
 
 There is no separate lint/format step configured in this repo.
 
