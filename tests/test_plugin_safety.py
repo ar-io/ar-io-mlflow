@@ -19,6 +19,8 @@ from ario_mlflow import arweave
 from ario_mlflow.arweave import (
     WALLET_MODE_PERSISTENT,
     WALLET_MODE_USER,
+    WALLET_TYPE_ARWEAVE,
+    WALLET_TYPE_SOLANA,
     ArweaveAnchor,
     WalletLoadError,
 )
@@ -57,25 +59,31 @@ def test_load_wallet_raises_when_jwk_is_incomplete(tmp_path):
 
 
 def test_load_wallet_accepts_valid_jwk(tmp_path):
-    """Happy path — well-formed RSA JWK loads as ``user-configured``."""
+    """Happy path — well-formed RSA JWK loads as ``user-configured`` /
+    ``arweave`` (the chain is detected from the JWK object shape)."""
     required = ("kty", "n", "e", "d", "p", "q", "dp", "dq", "qi")
     valid = tmp_path / "valid.json"
     valid.write_text(json.dumps({f: "x" for f in required}))
-    jwk, mode = ArweaveAnchor._load_or_create_wallet(str(valid))
+    secret, wallet_type, mode = ArweaveAnchor._load_or_create_wallet(str(valid))
     assert mode == WALLET_MODE_USER
-    assert set(required).issubset(jwk)
+    assert wallet_type == WALLET_TYPE_ARWEAVE
+    assert set(required).issubset(secret)
 
 
 def test_load_wallet_falls_back_to_default_when_no_caller_path(tmp_path, monkeypatch):
     """No ``wallet_path`` supplied → auto-generate at the default path.
     Caller's intent is silent here (they opted out of explicit
-    configuration), so generating a wallet is the right default."""
+    configuration), so generating a wallet is the right default — and the
+    default chain is **Solana** (a 64-int id.json), not RSA."""
     fake_default = tmp_path / "auto-wallet.json"
     monkeypatch.setattr(arweave, "DEFAULT_WALLET_PATH", str(fake_default))
-    jwk, mode = ArweaveAnchor._load_or_create_wallet("")
+    secret, wallet_type, mode = ArweaveAnchor._load_or_create_wallet("")
     assert mode == WALLET_MODE_PERSISTENT
+    assert wallet_type == WALLET_TYPE_SOLANA
     assert fake_default.exists()
-    assert {"kty", "n", "e", "d"}.issubset(jwk)
+    # Solana CLI id.json: a 64-int byte array (32-byte seed + 32-byte pubkey).
+    assert isinstance(secret, list) and len(secret) == 64
+    assert all(isinstance(b, int) and 0 <= b <= 255 for b in secret)
 
 
 # --- Public API: WalletLoadError is part of the package surface ----------

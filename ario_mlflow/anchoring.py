@@ -698,6 +698,9 @@ def anchor(
     wallet_mode = getattr(arweave, "wallet_mode", None)
     if wallet_mode:
         tags["ario.wallet_mode"] = wallet_mode
+    wallet_type = getattr(arweave, "wallet_type", None)
+    if wallet_type:
+        tags["ario.wallet_type"] = wallet_type
 
     for key, value in tags.items():
         client.set_tag(run_id, key, value)
@@ -749,6 +752,7 @@ def anchor(
                 envelope, anchor_result,
                 artifact_hash=art_hash,
                 wallet_mode=wallet_mode,
+                wallet_type=wallet_type,
             )
             with open(os.path.join(ario_dir, "verification.html"), "w") as f:
                 f.write(html_content)

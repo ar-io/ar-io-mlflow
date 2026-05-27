@@ -11,6 +11,22 @@ Active development. Not yet published to PyPI; install from source via
 
 ### Added
 
+- **Solana (ed25519) is the default upload/funding wallet** — newly
+  generated wallets are now Solana keypairs (persisted as a Solana CLI
+  `id.json` at the existing `~/.ario-mlflow/wallet.json` path), uploaded to
+  Arweave via Turbo `SolanaSigner` (ANS-104 sigType 2). **Arweave RSA still
+  works and is selectable.** The chain is detected from the key's JSON
+  shape — an RSA JWK object → `arweave`, a 64-int `id.json` array or base58
+  string → `solana` — so there is still **one** env var
+  (`ARIO_MLFLOW_ARWEAVE_WALLET`) and **one** wallet path, both accepting
+  either chain. A pre-existing RSA `wallet.json` is detected and reused
+  unchanged (never overwritten); zero config required for the Solana
+  default. `WalletLoadError` discipline is preserved for both chains (a
+  malformed caller-supplied wallet never silently substitutes). The chain
+  is surfaced in logs, the `ario/verification.html` wallet banner, and the
+  new `ario.wallet_type` MLflow run tag. Upload/funding layer only — the
+  Ed25519 envelope-signing key (`ProofEngine`), the envelope/proof format,
+  and `verify_record` are unchanged.
 - **`ar-io-mlflow audit <model> --format=json [--output <path>]`** — the
   model-lineage audit now emits a machine-readable evidence bundle
   (`ario.mlflow.audit/v1`), parallel to the agent's `ariod audit export`.
@@ -33,6 +49,7 @@ Active development. Not yet published to PyPI; install from source via
 
 ### Changed
 
+- **`turbo-sdk>=0.1.0`** (was `>=0.0.5`) — required for `SolanaSigner`.
 - **Verifier results expose `spec_version_status` and `legacy_envelope`**
   — `ProofEngine.verify_commitment()` and `verify.verify_signature()`
   now report whether the envelope's `spec_version` is `"supported"`,
