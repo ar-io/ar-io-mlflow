@@ -6,8 +6,15 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Active development. Not yet published to PyPI; install from source via
-`pip install -e .`.
+_No changes yet._
+
+## [0.2.0] — 2026-05-27
+
+The first release beyond the initial alpha — Solana-default funding wallet,
+the `spec_version` envelope field + cross-tool verification, a
+machine-readable audit bundle, and a full programmatic verification
+reference. Install from source via `pip install -e .` (PyPI publish
+pending).
 
 ### Added
 
@@ -40,12 +47,11 @@ Active development. Not yet published to PyPI; install from source via
   `create_commitment()` now carries `spec_version: "ario.mlflow/v1"` as
   part of the signed body. Pins the envelope shape so a future spec bump
   can roll out via the same field. Exported as `ario_mlflow.SPEC_VERSION`.
-- **Cross-product spec acceptance** — `verify_commitment()` and
-  `verify_signature()` accept envelopes minted by the sister
-  [`ar-io-agent`](https://github.com/ar-io/ar-io-agent) daemon
-  (`ario.agent/v1`) alongside plugin envelopes (`ario.mlflow/v1`). The
-  two share the envelope spec + Ed25519/JCS crypto and now verify each
-  other's records bidirectionally.
+- **Cross-tool spec acceptance** — `verify_commitment()` and
+  `verify_signature()` accept any envelope whose `spec_version` major is
+  in the recognized set, not only plugin-minted `ario.mlflow/v1`.
+  Envelopes produced by any other tool that shares the spec (RFC-8785 JCS
+  + SHA-256 + Ed25519) verify under the plugin's verifier.
 
 ### Changed
 
