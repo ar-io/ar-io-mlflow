@@ -1,6 +1,6 @@
 # MLflow 3.x support — plan (dual v2/v3)
 
-> **Status: planned. Today `ar-io-mlflow` targets MLflow 2.x (2.14+).** Empirically, the plugin **largely works on MLflow 3.12 already** — the gap is narrow. This doc tracks closing it to *declared* dual v2/v3 support. The acceptance gate is `tests/test_mlflow3_integration.py` (a real-MLflow, non-mocked test), **not** the mocked unit suite (a green mock suite on 3.x is necessary, not sufficient).
+> **Status: the v3 model-resolution fix has landed and is verified** on real MLflow **2.22 + 3.12** (`tests/test_mlflow3_integration.py`, now run in CI on both majors). The core anchor/verify artifact-hashing path works on both. **Remaining for full declared dual support:** real-MLflow-3 integration coverage for the registration/promotion (`ArioMlflowClient`), prediction (`VerifiedModel.predict`), and full `verify_record` paths (they pass the *mocked* suite on 3.x but lack dedicated v3 coverage); plus sqlite-backend docs (the file store is deprecated). The acceptance gate is the integration test, **not** the mocked unit suite.
 
 ## Sources (authoritative — verified, not inferred)
 
@@ -47,14 +47,15 @@ So the integrity guarantee silently degrades for custom-named models on v3. `Ver
 
 | # | Step | Effort | Notes |
 |---|------|--------|-------|
-| 0 | **Honest docs** (done) | S | CLAUDE.md/README corrected to the sourced reality: v2 supported, v3 largely works with the one auto-resolution gap. |
-| 1 | **Real-MLflow integration test** (this PR) | S | `tests/test_mlflow3_integration.py` — passes on 2.x; on 3.x, `artifact_checksums(default "model")` passes and `_logged_model_paths` is `[]` (the gap). The acceptance gate. |
-| 2 | **v3-aware model resolution** | **S–M (1–3d)** | Teach `_logged_model_paths` + the verify-side refetcher to read `run.outputs.model_outputs` / `models:/<model_id>` on v3, falling back to `mlflow.log-model.history` on v2. Closes the custom-name gap. **The crux — and it's small.** |
-| 3 | **CI matrix** | S | Add an MLflow-3 job + keep a 2.x job, both running the integration test, so "supported" stays tested. |
-| 4 | **Docs: sqlite backend guidance** | S | Note the file-store deprecation; recommend `sqlite:///…` for new setups. |
-| 5 | *(later, optional)* aliases for promotion; trace-id shim | S each | Only when MLflow actually removes stages / `get_active_trace_id`. |
+| 0 | **Honest docs** | ✅ done | CLAUDE.md/README corrected to the sourced reality. |
+| 1 | **Real-MLflow integration test** | ✅ done | `tests/test_mlflow3_integration.py` — passes on real 2.22 + 3.12; uses a non-default model name to exercise the v3 gap. The acceptance gate. |
+| 2 | **v3-aware model resolution** | ✅ done | `_logged_model_paths` reads `run.outputs.model_outputs` → `get_logged_model(model_id).name` on v3, falling back to `mlflow.log-model.history` on v2. Feeds both `anchor()` and the verify-side refetcher (one helper, both paths). |
+| 3 | **CI matrix** | ✅ done | `test.yml` `integration` job runs the gate on `mlflow<3` **and** `mlflow>=3`. |
+| 4 | **Broaden v3 integration coverage** | M | Add real-MLflow-3 tests for registration/promotion (`ArioMlflowClient`), prediction (`VerifiedModel.predict`), and full `verify_record` — currently mocked-only on 3.x. Required before claiming *full* v3 parity. |
+| 5 | **Docs: sqlite backend guidance** | S | Note the file-store deprecation (Feb 2026); recommend `sqlite:///…` for new setups. |
+| 6 | *(later, optional)* aliases for promotion; `get_last_active_trace_id` shim | S each | Only when MLflow actually removes stages / `get_active_trace_id`. |
 
-**Total to declared dual support: ~2–4 days** (Step 2 is the only real code; #5 is deferred until upstream forces it).
+**Landed: the artifact-resolution path works + is CI-tested on v2 + v3.** Remaining (#4) is broadening integration coverage to the other entry points before declaring full parity.
 
 ## Decisions
 

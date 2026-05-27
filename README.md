@@ -22,16 +22,18 @@ Python 3.10+. Pulls in MLflow, PyNaCl, the ar.io Turbo SDK, and `cryptography`.
 
 ### MLflow version compatibility
 
-**Supported target: MLflow 2.x (2.14+); MLflow 3.x largely works, with one
-known gap** (verified against real MLflow 2.x and 3.12). MLflow 3 makes
-models first-class `LoggedModel` entities and drops the run-level
-`log-model.history` tag, so the plugin's artifact-hash *auto-resolution*
-misses models logged under a **non-default name** on v3 (a model logged with
-the default `name="model"` still hashes fine). Declared dual v2/v3 support is
-planned — see [`docs/mlflow-v3-support.md`](docs/mlflow-v3-support.md). One v3
-change is already handled: prediction-side `verify_source_of_truth` reads
-trace tags via `_tracing_client.get_trace_info`, sidestepping MLflow 3.x's
-stricter `mlflow.artifactLocation` requirement on `client.get_trace()`.
+**MLflow 2.x (2.14+) and 3.x are both supported** for the core anchor/verify
+path — verified on real MLflow 2.22 and 3.12. MLflow 3 makes models
+first-class `LoggedModel` entities and drops the run-level `log-model.history`
+tag; the plugin resolves logged models via `run.outputs.model_outputs` on v3
+(falling back to the tag on v2), so model artifact-hash auto-resolution works
+on both. Note: MLflow's filesystem tracking store (`./mlruns`, the default) is
+deprecated as of Feb 2026 — prefer a `sqlite:///…` backend for new setups.
+See [`docs/mlflow-v3-support.md`](docs/mlflow-v3-support.md) for the full v3
+picture (and which paths still need v3 integration coverage). One v3 change is
+already handled: prediction-side `verify_source_of_truth` reads trace tags via
+`_tracing_client.get_trace_info`, sidestepping MLflow 3.x's stricter
+`mlflow.artifactLocation` requirement on `client.get_trace()`.
 
 ## Quickstart
 
