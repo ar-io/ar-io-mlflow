@@ -86,23 +86,51 @@ class ArtifactAccessError(RuntimeError):
 def _logged_model_paths(run_data) -> list[str]:
     """Return the artifact paths of every model logged in this run.
 
-    MLflow writes a ``mlflow.log-model.history`` tag whose value is a JSON list
-    describing each ``mlflow.<flavor>.log_model`` call in the run. Reading this
-    tag lets ``anchor()`` hash whatever the user actually logged, rather than
+    Lets ``anchor()`` hash whatever the user actually logged, rather than
     silently defaulting to ``"model"`` and skipping the hash when the caller
     used a different name.
+
+    Two MLflow eras, both handled:
+
+    - **MLflow 2.x** writes a ``mlflow.log-model.history`` run tag (a JSON list
+      describing each ``log_model`` call); we read the ``artifact_path`` of each.
+    - **MLflow 3.x** makes models first-class ``LoggedModel`` entities — that
+      tag is gone and the logged model is recorded in ``run.outputs.model_outputs``
+      instead. We resolve each output's ``model_id`` to its logged-model
+      ``name``, which is the ``artifact_path`` ``download_artifacts(run_id, …)``
+      expects. Without this, a v3 model logged under a non-default name falls
+      through to ``"model"`` and its artifact hash is silently skipped.
     """
+    paths: list[str] = []
+
+    # MLflow 2.x — the log-model.history tag.
     history_json = run_data.data.tags.get("mlflow.log-model.history")
-    if not history_json:
-        return []
-    try:
-        history = json.loads(history_json)
-    except (ValueError, TypeError):
-        return []
-    paths = []
-    for entry in history:
-        if isinstance(entry, dict) and entry.get("artifact_path"):
-            paths.append(entry["artifact_path"])
+    if history_json:
+        try:
+            for entry in json.loads(history_json):
+                if isinstance(entry, dict) and entry.get("artifact_path"):
+                    paths.append(entry["artifact_path"])
+        except (ValueError, TypeError):
+            pass
+    if paths:
+        return paths
+
+    # MLflow 3.x — first-class LoggedModel outputs (the tag is absent here).
+    model_outputs = getattr(getattr(run_data, "outputs", None), "model_outputs", None) or []
+    if model_outputs:
+        try:
+            from mlflow.tracking import MlflowClient
+
+            client = MlflowClient()
+            for output in model_outputs:
+                model_id = getattr(output, "model_id", None)
+                if not model_id:
+                    continue
+                name = getattr(client.get_logged_model(model_id), "name", None)
+                if name:
+                    paths.append(name)
+        except Exception:  # noqa: BLE001 — v3 logged-model resolution is best-effort; on failure anchor() falls back to "model"
+            pass
     return paths
 
 
