@@ -85,7 +85,13 @@ Internal field names (`signature_valid`, `hash_match`, `source_of_truth_ok`, `at
 
 ### MLflow version compatibility
 
-Tested against MLflow 2.14 through 3.x. Prediction-side `verify_source_of_truth` uses `_tracing_client.get_trace_info` (tags-only) to sidestep MLflow 3.x's stricter `mlflow.artifactLocation` requirement on `client.get_trace()`. If you touch prediction verification, keep this path; do not switch back to `client.get_trace()`.
+**Supported target: MLflow 2.x (2.14+). MLflow 3.x largely works, with one known gap.** This is verified empirically against real MLflow 2.x and 3.12 (`tests/test_mlflow3_integration.py`), not just the mocked unit suite — and it corrects an earlier docs-based overstatement. Tracked in [`docs/mlflow-v3-support.md`](docs/mlflow-v3-support.md).
+
+**The one real v3 functional gap — model auto-resolution.** MLflow 3 makes models first-class `LoggedModel` entities ("moving beyond the run-centric approach" — v3.1.0 release notes) and **drops the `mlflow.log-model.history` run tag**; the logged model is now in `run.outputs.model_outputs` (`LoggedModelOutput.model_id`) / `models:/<model_id>`. So `_logged_model_paths()` (which reads the gone tag) returns `[]` on v3 → a model logged under a **non-default name** loses artifact-hash auto-resolution (`anchor()` falls back to `"model"`; if that path isn't present the hash is silently skipped, `artifact_status="hash_failed"`). A model logged with the default `name="model"` still hashes fine on 3.12. Fix: read `run.outputs.model_outputs` on v3 (falling back to the tag on v2) in `_logged_model_paths` + the verify-side refetcher.
+
+**Verified NOT broken on 3.12** (an earlier draft wrongly claimed these — retracted): `mlflow.get_active_trace_id()` is present and not deprecated; `transition_model_version_stage` is present (deprecated-but-functional). **Deprecation to watch:** the filesystem tracking backend (`./mlruns`, the plugin/CLI default) is deprecated as of Feb 2026 — prefer a `sqlite:///…` backend for new setups.
+
+Already-handled v3 path: prediction-side `verify_source_of_truth` uses `_tracing_client.get_trace_info` (tags-only) to sidestep MLflow 3.x's stricter `mlflow.artifactLocation` requirement on `client.get_trace()` — keep this path; do not switch back to `client.get_trace()`.
 
 ## Conventions to preserve
 
