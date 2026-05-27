@@ -8,6 +8,30 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 _No changes yet._
 
+## [0.2.1] — 2026-05-27
+
+### Fixed
+
+- **MLflow 3.x model artifact resolution.** MLflow 3 makes models first-class
+  `LoggedModel` entities and drops the `mlflow.log-model.history` run tag, so
+  the plugin's artifact-path auto-resolution returned nothing on v3 — a model
+  logged under a non-default name fell back to `"model"` and had its artifact
+  hash **silently skipped**. `_logged_model_paths()` now reads
+  `run.outputs.model_outputs` (→ `get_logged_model(model_id).name`) on v3,
+  falling back to the tag on v2, restoring artifact-hash integrity for the
+  `anchor()` and verify paths. Verified on real MLflow 2.22 and 3.12.
+
+### Changed
+
+- **Honest MLflow version-compatibility docs.** No longer claims blanket
+  "tested 2.14 through 3.x." MLflow 2.x and 3.x are supported for the core
+  anchor/verify (artifact-hashing) path, now tested in CI against **both**
+  majors via a real-MLflow integration test (`tests/test_mlflow3_integration.py`).
+  Registration/promotion, prediction, and full `verify_record` still need
+  dedicated v3 integration coverage (tracked in `docs/mlflow-v3-support.md`).
+  Note: MLflow's filesystem tracking store (the default) is deprecated upstream
+  as of Feb 2026 — prefer a `sqlite:///…` backend for new setups.
+
 ## [0.2.0] — 2026-05-27
 
 The first release beyond the initial alpha — Solana-default funding wallet,
