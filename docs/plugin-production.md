@@ -25,10 +25,26 @@ A typical setup:
 Mixing environments on one wallet means a dev mistake can pollute prod's
 on-chain history. Per-environment wallets isolate that.
 
+### Wallet chain — Solana by default
+
+Newly generated wallets are **Solana** (ed25519), written as a Solana CLI
+`id.json` at the wallet path. **Arweave RSA wallets remain fully supported**;
+the plugin detects the chain from the key's JSON shape (an RSA JWK object →
+Arweave; a 64-int `id.json` array or base58 string → Solana). Ops consequences:
+
+- A wallet file already on disk is **reused as-is and never overwritten** — a
+  pre-Solana RSA `wallet.json` keeps its address, no migration needed.
+- To pin a chain, point `ARIO_MLFLOW_ARWEAVE_WALLET` at that chain's key.
+- A malformed *caller-supplied* wallet raises `WalletLoadError` (for either
+  chain) — the plugin never silently substitutes a different identity.
+- The anchor destination is Arweave (via Turbo) regardless of funding chain;
+  the env var keeps its legacy name for backward compatibility.
+
 ### Loading the wallet from a secrets manager
 
-`ARIO_MLFLOW_ARWEAVE_WALLET` is a file path, not the JWK contents. Wire
-your secrets manager to materialize the file at runtime:
+`ARIO_MLFLOW_ARWEAVE_WALLET` is a file path, not the key contents (the file
+holds a Solana `id.json` / base58 secret or an Arweave RSA JWK). Wire your
+secrets manager to materialize the file at runtime:
 
 **HashiCorp Vault** (Vault Agent sidecar pattern):
 ```hcl
@@ -57,7 +73,8 @@ initContainers:
 Same env var pointing at the materialized file.
 
 **Kubernetes Secret** (simplest, less rotation control):
-Mount a `Secret` containing the JWK as a file, point the env var at it.
+Mount a `Secret` containing the wallet key (Solana `id.json` or RSA JWK) as a
+file, point the env var at it.
 
 ### Wallet permissions
 
@@ -68,13 +85,14 @@ it.
 
 ### Key rotation
 
-Ed25519 signing keys are independent of the Arweave wallet. Rotate them
+Ed25519 signing keys are independent of the funding wallet. Rotate them
 separately:
 
-- **Arweave wallet rotation**: generate a new JWK, fund it, update the
-  secret, restart workloads. New proofs sign with the new wallet
-  address; old proofs remain valid (verification doesn't depend on the
-  current wallet, just on the embedded `public_key`).
+- **Funding-wallet rotation** (Solana or Arweave): generate a new wallet
+  key, fund it if needed, update the secret, restart workloads. New uploads
+  are funded by the new wallet address; existing proofs remain valid
+  (verification depends on the envelope's embedded Ed25519 `public_key`,
+  never on the funding wallet).
 - **Ed25519 signing key rotation**: similar — new key takes over for
   new proofs; old proofs remain valid against the public key embedded
   in their envelope. Document the rotation in your security log so
@@ -90,7 +108,7 @@ so verifiers can bind the new key to your organization.
 
 The wallet needs to live somewhere CI can read it. Patterns:
 
-1. **CI-scoped secret** (most common): store the JWK as a CI secret,
+1. **CI-scoped secret** (most common): store the wallet key as a CI secret,
    write to a temp file at job start, set `ARIO_MLFLOW_ARWEAVE_WALLET`
    to that path. Cleanup happens automatically when the runner is torn
    down.
@@ -111,8 +129,8 @@ forensics harder.
 (asynchronously). Workloads need either:
 
 - Wallet file mounted into every replica (K8s Secret, Vault sidecar)
-- Or wallet contents as an env var if you can serialize JWK to a string
-  — but file-based is the supported path
+- Or the wallet key materialized to a file from an env var / secret — but
+  file-based (`ARIO_MLFLOW_ARWEAVE_WALLET` as a path) is the supported path
 
 If you scale a service horizontally, every replica signs independently
 with the same wallet. That's fine for chain semantics (predictions

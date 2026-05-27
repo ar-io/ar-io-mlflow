@@ -77,7 +77,20 @@ WALLET_MODE_USER = "user-configured"
 WALLET_MODE_PERSISTENT = "persistent"
 WALLET_MODE_EPHEMERAL = "ephemeral"
 
+# The funding/upload chain a wallet belongs to. Orthogonal to wallet_mode
+# (persistence). Detected from the key's JSON shape, never configured:
+#   arweave — an RSA-4096 JWK object (the original/legacy wallet format).
+#   solana  — an ed25519 key as a Solana CLI id.json (64-int array) or a
+#             base58 secret string. The default for newly generated wallets.
+# The upload destination is still Arweave (via Turbo) in both cases; only the
+# signer/funding chain differs, so ``ArweaveAnchor`` stays accurately named.
+WALLET_TYPE_ARWEAVE = "arweave"
+WALLET_TYPE_SOLANA = "solana"
+
 _REQUIRED_JWK_FIELDS = {"kty", "n", "e", "d", "p", "q", "dp", "dq", "qi"}
+
+# A Solana CLI id.json is a 64-int array: 32-byte seed || 32-byte public key.
+_SOLANA_ID_JSON_LEN = 64
 
 
 class WalletLoadError(Exception):
@@ -112,6 +125,7 @@ class ArweaveAnchor:
         self.gateways = _resolve_gateways(gateways, gateway_host)
         self.enabled = False
         self.wallet_mode: str | None = None
+        self.wallet_type: str | None = None
         self._signer = None
         self._upload_url = None
         self._token = None
@@ -138,36 +152,46 @@ class ArweaveAnchor:
         wallet_path = wallet_path or os.environ.get("ARIO_MLFLOW_ARWEAVE_WALLET", "")
 
         try:
-            from turbo_sdk import ArweaveSigner, Turbo
+            from turbo_sdk import ArweaveSigner, SolanaSigner, Turbo
         except ImportError as e:
             logger.warning(f"turbo-sdk not available; Arweave anchoring disabled: {e}")
             return
 
         # Wallet loading: caller-intent violations (bad ``wallet_path``)
         # raise WalletLoadError and propagate. Default-path failures
-        # degrade to ephemeral inside _load_or_create_wallet.
-        jwk, mode = self._load_or_create_wallet(wallet_path)
+        # degrade to ephemeral inside _load_or_create_wallet. The detected
+        # ``wallet_type`` selects the signer; the upload destination is
+        # Arweave (via Turbo) for both chains.
+        secret, wallet_type, mode = self._load_or_create_wallet(wallet_path)
 
         try:
-            self._signer = ArweaveSigner(jwk)
+            if wallet_type == WALLET_TYPE_SOLANA:
+                self._signer = SolanaSigner(secret)
+            else:
+                self._signer = ArweaveSigner(secret)
             turbo = Turbo(self._signer)
             self._upload_url = turbo.upload_url
-            self._token = turbo.token
+            self._token = turbo.token  # auto-resolves to "arweave" / "solana"
             self.enabled = True
             self.wallet_mode = mode
+            self.wallet_type = wallet_type
 
             address = self._signer.get_wallet_address()
             if mode == WALLET_MODE_USER:
-                logger.info(f"Arweave anchoring enabled (wallet: {address}, mode=user-configured)")
+                logger.info(
+                    f"Arweave anchoring enabled (chain={wallet_type}, wallet={address}, "
+                    f"mode=user-configured)"
+                )
             elif mode == WALLET_MODE_PERSISTENT:
                 logger.info(
-                    f"Arweave anchoring enabled (wallet: {address}, mode=persistent, "
-                    f"path={DEFAULT_WALLET_PATH}) — set ARIO_MLFLOW_ARWEAVE_WALLET to use your own"
+                    f"Arweave anchoring enabled (chain={wallet_type}, wallet={address}, "
+                    f"mode=persistent, path={DEFAULT_WALLET_PATH}) — "
+                    f"set ARIO_MLFLOW_ARWEAVE_WALLET to use your own"
                 )
             else:
                 logger.warning(
-                    f"Arweave anchoring enabled (wallet: {address}, mode=ephemeral) — "
-                    f"wallet is in-memory only and will rotate on restart. "
+                    f"Arweave anchoring enabled (chain={wallet_type}, wallet={address}, "
+                    f"mode=ephemeral) — wallet is in-memory only and will rotate on restart. "
                     f"Persistent wallet path {DEFAULT_WALLET_PATH} was not writable."
                 )
         except Exception as e:  # noqa: BLE001 — Turbo signer/transport init failure: degrade to disabled
@@ -249,27 +273,94 @@ class ArweaveAnchor:
         return baseline
 
     @classmethod
-    def _load_or_create_wallet(cls, wallet_path: str) -> tuple[dict, str]:
-        """Return ``(jwk, mode)`` for the wallet to use.
+    def _detect_and_validate(cls, loaded, source: str):
+        """Detect the wallet chain from a parsed JSON value and validate it.
+
+        Chain is a property of the key's JSON *shape*, never configured:
+
+        - a JSON object (``dict``) with the full RSA JWK field set →
+          ``arweave`` (returns the JWK dict);
+        - a JSON array of 64 byte-ints (a Solana CLI ``id.json``) **or** a
+          base58 ``str`` secret → ``solana`` (validated by constructing a
+          ``SolanaSigner``, returns the secret as given);
+        - anything else (including an incomplete JWK object) →
+          :class:`WalletLoadError`.
+
+        Returns ``(secret, wallet_type)``. ``source`` names the wallet for
+        error messages.
+        """
+        if isinstance(loaded, dict):
+            if _REQUIRED_JWK_FIELDS.issubset(loaded):
+                return loaded, WALLET_TYPE_ARWEAVE
+            raise WalletLoadError(
+                f"Wallet at {source} is a JSON object but not a complete RSA JWK "
+                f"(missing one or more of: {sorted(_REQUIRED_JWK_FIELDS)})"
+            )
+
+        if isinstance(loaded, list):
+            if len(loaded) != _SOLANA_ID_JSON_LEN or not all(
+                isinstance(b, int) and 0 <= b <= 255 for b in loaded
+            ):
+                raise WalletLoadError(
+                    f"Wallet at {source} is a JSON array but not a valid Solana "
+                    f"id.json (expected a {_SOLANA_ID_JSON_LEN}-int byte array)"
+                )
+            secret = loaded
+        elif isinstance(loaded, str):
+            secret = loaded
+        else:
+            raise WalletLoadError(
+                f"Wallet at {source} is not a recognized format (expected an RSA "
+                f"JWK object, a Solana id.json array, or a base58 string)"
+            )
+
+        # Validate the Solana secret by attempting to build the signer —
+        # catches a bad base58 string or a wrong-length/garbage byte array.
+        try:
+            from turbo_sdk import SolanaSigner
+            SolanaSigner(secret)
+        except WalletLoadError:
+            raise
+        except Exception as e:  # noqa: BLE001 — any SolanaSigner construction failure is a malformed key
+            raise WalletLoadError(
+                f"Wallet at {source} is not a valid Solana key: {type(e).__name__}: {e}"
+            ) from e
+        return secret, WALLET_TYPE_SOLANA
+
+    @classmethod
+    def _load_or_create_wallet(cls, wallet_path: str) -> tuple[object, str, str]:
+        """Return ``(secret, wallet_type, mode)`` for the wallet to use.
+
+        ``wallet_type`` ∈ {``arweave``, ``solana``} is *detected* from the
+        key's JSON shape (see :meth:`_detect_and_validate`); ``mode`` ∈
+        {``user-configured``, ``persistent``, ``ephemeral``} is the
+        persistence axis. Both the env var ``ARIO_MLFLOW_ARWEAVE_WALLET``
+        and :data:`DEFAULT_WALLET_PATH` accept *either* chain's key.
 
         Resolution order:
 
         1. Caller-supplied ``wallet_path`` (or ``ARIO_MLFLOW_ARWEAVE_WALLET``)
-           — the wallet MUST be loadable from that path. Missing file,
-           unreadable file, malformed JSON, or incomplete JWK all raise
-           :class:`WalletLoadError`. The plugin refuses to silently
-           substitute an auto-generated wallet when the operator
-           explicitly named one.
-        2. ``DEFAULT_WALLET_PATH`` — if it already exists and is
-           well-formed, reuse it; if missing or malformed, generate a
-           new wallet and persist it there.
-        3. If step (2)'s filesystem write fails, fall back to a pure
-           in-memory wallet (``ephemeral`` mode).
+           — the wallet MUST be loadable and well-formed *for its detected
+           shape*. Missing file, unreadable file, malformed JSON, an
+           incomplete JWK, or an invalid Solana key all raise
+           :class:`WalletLoadError` (for **both** chains — the plugin
+           never silently substitutes an auto-generated wallet when the
+           operator named one).
+        2. ``DEFAULT_WALLET_PATH`` — if it already exists, detect its chain
+           and reuse it as-is (a legacy RSA ``wallet.json`` is reused
+           unchanged). An existing wallet file is **never overwritten**: if
+           it is unreadable/unrecognized, the plugin falls back to an
+           in-memory wallet rather than clobbering the file.
+        3. Fresh install (no wallet present) — generate a **Solana** keypair
+           (the default), persist it as a Solana CLI ``id.json`` (64-int
+           array) at the path, mode ``persistent``.
+        4. If step (3)'s filesystem write fails → in-memory Solana wallet,
+           mode ``ephemeral``.
         """
         if wallet_path:
             try:
                 with open(wallet_path) as f:
-                    jwk = json.load(f)
+                    loaded = json.load(f)
             except FileNotFoundError as e:
                 raise WalletLoadError(
                     f"Arweave wallet path was supplied but file does not exist: "
@@ -283,45 +374,65 @@ class ArweaveAnchor:
                 raise WalletLoadError(
                     f"Arweave wallet at {wallet_path} is not valid JSON: {e}"
                 ) from e
-            if not isinstance(jwk, dict) or not _REQUIRED_JWK_FIELDS.issubset(jwk):
-                raise WalletLoadError(
-                    f"Arweave wallet at {wallet_path} is not a complete RSA JWK "
-                    f"(missing one or more of: {sorted(_REQUIRED_JWK_FIELDS)})"
-                )
-            return jwk, WALLET_MODE_USER
+            secret, wallet_type = cls._detect_and_validate(loaded, wallet_path)
+            return secret, wallet_type, WALLET_MODE_USER
 
-        # No user-configured wallet. Try to reuse or create a persistent one.
+        # No user-configured wallet. Reuse a persistent one if present —
+        # detecting whichever chain it is — and NEVER overwrite it.
         if os.path.exists(DEFAULT_WALLET_PATH):
             try:
                 with open(DEFAULT_WALLET_PATH) as f:
-                    jwk = json.load(f)
-                if isinstance(jwk, dict) and _REQUIRED_JWK_FIELDS.issubset(jwk):
-                    return jwk, WALLET_MODE_PERSISTENT
+                    loaded = json.load(f)
+                secret, wallet_type = cls._detect_and_validate(loaded, DEFAULT_WALLET_PATH)
+                return secret, wallet_type, WALLET_MODE_PERSISTENT
+            except (OSError, json.JSONDecodeError, WalletLoadError) as e:
+                # The file exists but we can't use it. Do NOT overwrite it
+                # (no surprise data loss — it may be a wallet format we
+                # don't recognize yet). Use an in-memory Solana wallet for
+                # this session and tell the operator how to reset.
                 logger.warning(
-                    f"Persistent wallet at {DEFAULT_WALLET_PATH} is malformed; regenerating"
+                    f"Existing wallet at {DEFAULT_WALLET_PATH} is unreadable or "
+                    f"unrecognized ({e}); not overwriting it. Using an in-memory "
+                    f"(ephemeral) Solana wallet for this session — remove the file "
+                    f"to provision a fresh persistent wallet."
                 )
-            except (OSError, json.JSONDecodeError) as e:
-                logger.warning(
-                    f"Could not read persistent wallet at {DEFAULT_WALLET_PATH}: {e}; regenerating"
-                )
+                return cls._generate_solana_wallet(), WALLET_TYPE_SOLANA, WALLET_MODE_EPHEMERAL
 
-        jwk = cls._generate_wallet()
+        # Fresh install: generate a Solana wallet (the default) and persist
+        # it as a Solana CLI id.json (64-int array) at the single path.
+        id_json = cls._generate_solana_wallet()
         try:
             os.makedirs(os.path.dirname(DEFAULT_WALLET_PATH), exist_ok=True)
             with open(DEFAULT_WALLET_PATH, "w") as f:
-                json.dump(jwk, f)
+                json.dump(id_json, f)
             os.chmod(DEFAULT_WALLET_PATH, 0o600)
             logger.info(
-                f"Auto-generated Arweave wallet at {DEFAULT_WALLET_PATH} — "
+                f"Auto-generated Solana wallet at {DEFAULT_WALLET_PATH} — "
                 f"back this up or set ARIO_MLFLOW_ARWEAVE_WALLET for production use"
             )
-            return jwk, WALLET_MODE_PERSISTENT
+            return id_json, WALLET_TYPE_SOLANA, WALLET_MODE_PERSISTENT
         except OSError as e:
             logger.warning(
                 f"Could not persist auto-generated wallet to {DEFAULT_WALLET_PATH}: {e}; "
                 f"using in-memory wallet for this session only"
             )
-            return jwk, WALLET_MODE_EPHEMERAL
+            return id_json, WALLET_TYPE_SOLANA, WALLET_MODE_EPHEMERAL
+
+    @staticmethod
+    def _generate_solana_wallet() -> list[int]:
+        """Generate a fresh Solana ed25519 keypair as a CLI ``id.json``.
+
+        Uses ``cryptography`` (already a dependency — no new dep). The
+        Solana ``id.json`` format is a 64-int byte array: the 32-byte seed
+        followed by the 32-byte public key. ``SolanaSigner`` accepts this
+        list directly.
+        """
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+        priv = Ed25519PrivateKey.generate()
+        seed = priv.private_bytes_raw()              # 32 bytes
+        pub = priv.public_key().public_bytes_raw()   # 32 bytes
+        return list(seed + pub)
 
     @staticmethod
     def _generate_wallet() -> dict:

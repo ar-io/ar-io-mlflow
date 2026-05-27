@@ -15,6 +15,7 @@ def generate_verification_html(
     cli_verify_cmd: str | None = None,
     verify_base_url: str | None = None,
     wallet_mode: str | None = None,
+    wallet_type: str | None = None,
 ) -> str:
     """Generate an HTML report for the MLflow artifact viewer.
 
@@ -37,6 +38,9 @@ def generate_verification_html(
             ``"ephemeral"`` — rendered as a small transparency note so
             readers can tell whether the proof was signed with a
             production-quality wallet or a demo-default one.
+        wallet_type: The funding chain of the upload wallet —
+            ``"solana"`` (the default) or ``"arweave"``. Surfaced in the
+            transparency note alongside ``wallet_mode``.
     """
     record = proof.get("record", {})
     event_type = record.get("event_type", "unknown")
@@ -69,12 +73,17 @@ def generate_verification_html(
     # Wallet-mode notice — only shown when the plugin ran on an auto-generated
     # wallet, so readers can tell at a glance that this is a demo-default
     # signer (not a caller-configured production wallet).
+    # Chain label for the transparency note ("Solana"/"Arweave"). The upload
+    # destination is Arweave either way; this names the funding/signer chain.
+    chain_label = {"solana": "Solana", "arweave": "Arweave"}.get(wallet_type or "")
+    chain_word = f"{chain_label} " if chain_label else ""
+
     wallet_notice = ""
     if wallet_mode == WALLET_MODE_PERSISTENT:
         wallet_notice = (
             '<div style="background:#fef9c3;border:1px solid #fde047;border-radius:6px;'
             'padding:10px 14px;margin-bottom:16px;font-size:13px;color:#713f12;">'
-            "Signed with the plugin's auto-generated wallet "
+            f"Signed with the plugin's auto-generated {chain_word}wallet "
             "(<code>~/.ario-mlflow/wallet.json</code>). Set "
             "<code>ARIO_MLFLOW_ARWEAVE_WALLET</code> to sign with your own wallet.</div>"
         )
@@ -82,7 +91,7 @@ def generate_verification_html(
         wallet_notice = (
             '<div style="background:#fee2e2;border:1px solid #fecaca;border-radius:6px;'
             'padding:10px 14px;margin-bottom:16px;font-size:13px;color:#7f1d1d;">'
-            "Signed with an <strong>in-memory, ephemeral</strong> wallet. "
+            f"Signed with an <strong>in-memory, ephemeral</strong> {chain_word}wallet. "
             "The signing address will rotate on restart. Configure "
             "<code>ARIO_MLFLOW_ARWEAVE_WALLET</code> for stable provenance.</div>"
         )

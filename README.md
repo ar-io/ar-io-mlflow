@@ -207,6 +207,12 @@ the plugin's smoke test). **Turbo's free tier covers uploads under 105 KiB**,
 so typical usage is free — the auto-generated wallet works out of the box
 with zero balance, and most teams never need to fund it.
 
+The upload/funding wallet defaults to **Solana** (ed25519), persisted as a
+Solana CLI `id.json` at `~/.ario-mlflow/wallet.json`. **Arweave RSA wallets
+still work** — the chain is auto-detected from the key's shape, so a wallet
+you already use keeps working unchanged. The anchor destination is Arweave
+via Turbo either way; only the funding/signer chain differs.
+
 You'd only need to fund the wallet if you're hitting Turbo's per-account
 free-tier limits or anchoring larger payloads. To top up:
 
@@ -215,7 +221,8 @@ free-tier limits or anchoring larger payloads. To top up:
   (`wallet: <address>, mode=persistent`).
 
 **For production deployments**, generate a dedicated wallet (don't rely on the
-auto-generated one), set `ARIO_MLFLOW_ARWEAVE_WALLET=/path/to/your/wallet.json`,
+auto-generated one), point `ARIO_MLFLOW_ARWEAVE_WALLET` at it (a Solana
+`id.json` / base58 secret **or** an Arweave RSA JWK — chain auto-detected),
 and treat the wallet like any other production secret. Source data (params,
 metrics, artifact bytes) always stays in MLflow — nothing else goes on chain —
 so costs are flat regardless of how big your training run was.
@@ -295,7 +302,7 @@ weather without bubbling up as user-visible failures.
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `ARIO_MLFLOW_ARWEAVE_WALLET` | Path to an Arweave JWK wallet file | auto-generates + persists at `~/.ario-mlflow/wallet.json` |
+| `ARIO_MLFLOW_ARWEAVE_WALLET` | Path to a funding-wallet key — a Solana `id.json` / base58 secret **or** an Arweave RSA JWK (chain auto-detected from the key shape) | auto-generates a **Solana** wallet + persists at `~/.ario-mlflow/wallet.json` |
 | `ARIO_MLFLOW_GATEWAY_HOST` | Primary ar.io gateway used in returned URLs | `turbo-gateway.com` |
 | `ARIO_MLFLOW_GATEWAYS` | Comma-separated list of ar.io gateways tried in order on fetch failures (e.g. `g1.com,g2.com`) | primary + `ardrive.net` fallback |
 | `ARIO_MLFLOW_SIGNING_KEY` | Base64-encoded Ed25519 seed | auto-generates at `~/.ario-mlflow/keys/` |

@@ -105,7 +105,7 @@ Tested against MLflow 2.14 through 3.x. Prediction-side `verify_source_of_truth`
 | Var | Purpose | Default |
 | --- | --- | --- |
 | `MLFLOW_TRACKING_URI` | MLflow store the CLI/verifier reads from | `./mlruns` |
-| `ARIO_MLFLOW_ARWEAVE_WALLET` | Path to Arweave JWK; auto-generated under `~/.ario-mlflow/wallet.json` if unset | (auto) |
+| `ARIO_MLFLOW_ARWEAVE_WALLET` | Path to a funding wallet — Solana `id.json`/base58 **or** Arweave RSA JWK (chain auto-detected by shape); auto-generates a **Solana** wallet under `~/.ario-mlflow/wallet.json` if unset. Existing wallet files are reused, never overwritten | (auto) |
 | `ARIO_MLFLOW_GATEWAY_HOST` | Turbo upload host | `turbo-gateway.com` |
 | `ARIO_MLFLOW_GATEWAYS` | Comma-separated fetch fallbacks | `turbo-gateway.com,ardrive.net` |
 | `ARIO_MLFLOW_SIGNING_KEY` | Ed25519 signing key (base64); generated if unset | (auto) |
