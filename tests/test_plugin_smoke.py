@@ -1562,7 +1562,7 @@ def test_anchor_omits_artifact_hash_when_artifacts_unavailable(monkeypatch, tmp_
     monkeypatch.setattr(anchoring.mlflow, "active_run", lambda: _ActiveRun())
     monkeypatch.setattr(anchoring.mlflow.tracking, "MlflowClient", lambda: _FakeMlflowClient())
     monkeypatch.setattr(anchoring.mlflow, "log_artifacts", lambda *a, **kw: None)
-    monkeypatch.setattr(anchoring.mlflow, "get_active_trace_id", lambda: None)
+    monkeypatch.setattr(anchoring.mlflow, "get_active_trace_id", lambda: None, raising=False)
     monkeypatch.setattr(anchoring.mlflow, "get_tracking_uri", lambda: "file:./mlruns")
 
     result = anchor(
@@ -1635,7 +1635,7 @@ def test_anchor_accepts_custom_artifact_path(monkeypatch, tmp_path):
     monkeypatch.setattr(anchoring.mlflow, "active_run", lambda: _ActiveRun())
     monkeypatch.setattr(anchoring.mlflow.tracking, "MlflowClient", lambda: _FakeMlflowClient())
     monkeypatch.setattr(anchoring.mlflow, "log_artifacts", lambda *a, **kw: None)
-    monkeypatch.setattr(anchoring.mlflow, "get_active_trace_id", lambda: None)
+    monkeypatch.setattr(anchoring.mlflow, "get_active_trace_id", lambda: None, raising=False)
     monkeypatch.setattr(anchoring.mlflow, "get_tracking_uri", lambda: "file:./mlruns")
 
     anchor(
@@ -1855,7 +1855,7 @@ def _make_anchor_stubs(monkeypatch, *, run_id="run-test", run_tags=None,
     monkeypatch.setattr(anchoring.mlflow, "active_run", lambda: _ActiveRun())
     monkeypatch.setattr(anchoring.mlflow.tracking, "MlflowClient", lambda: _FakeMlflowClient())
     monkeypatch.setattr(anchoring.mlflow, "log_artifacts", _capture_artifacts)
-    monkeypatch.setattr(anchoring.mlflow, "get_active_trace_id", lambda: None)
+    monkeypatch.setattr(anchoring.mlflow, "get_active_trace_id", lambda: None, raising=False)
     monkeypatch.setattr(anchoring.mlflow, "get_tracking_uri", lambda: "file:./mlruns")
     # Default no-op artifact_checksums for tests that don't override.
     monkeypatch.setattr(anchoring, "artifact_checksums",
@@ -2122,7 +2122,7 @@ def test_verified_model_predict_produces_pure_commitment_envelope(monkeypatch):
     monkeypatch.setattr(model_module.mlflow.pyfunc, "load_model",
                         lambda uri: type("M", (), {"predict": lambda self, x: [1]})())
     monkeypatch.setattr(model_module.mlflow.tracking, "MlflowClient", lambda: type("C", (), {})())
-    monkeypatch.setattr(model_module.mlflow, "get_active_trace_id", lambda: None)
+    monkeypatch.setattr(model_module.mlflow, "get_active_trace_id", lambda: None, raising=False)
 
     captured = {}
 
@@ -2175,7 +2175,7 @@ def test_verified_model_predict_chains_to_registration_tx(monkeypatch):
     monkeypatch.setattr(model_module, "artifact_checksums", lambda *a, **kw: {})
     monkeypatch.setattr(model_module.mlflow.pyfunc, "load_model",
                         lambda uri: type("M", (), {"predict": lambda self, x: [1]})())
-    monkeypatch.setattr(model_module.mlflow, "get_active_trace_id", lambda: None)
+    monkeypatch.setattr(model_module.mlflow, "get_active_trace_id", lambda: None, raising=False)
 
     class _FakeProofEngine:
         def create_commitment(self, *, event_type, subject, payload_bytes, previous_hash, **_):
@@ -2230,7 +2230,7 @@ def test_verified_model_predict_chains_to_genesis_when_no_registration_tx(monkey
     monkeypatch.setattr(model_module, "artifact_checksums", lambda *a, **kw: {})
     monkeypatch.setattr(model_module.mlflow.pyfunc, "load_model",
                         lambda uri: type("M", (), {"predict": lambda self, x: [0]})())
-    monkeypatch.setattr(model_module.mlflow, "get_active_trace_id", lambda: None)
+    monkeypatch.setattr(model_module.mlflow, "get_active_trace_id", lambda: None, raising=False)
 
     class _FakeProofEngine:
         def create_commitment(self, *, previous_hash, **kw):
@@ -2280,7 +2280,7 @@ def test_verified_model_predict_writes_payload_artifact_to_source_run(monkeypatc
     monkeypatch.setattr(model_module, "artifact_checksums", lambda *a, **kw: {})
     monkeypatch.setattr(model_module.mlflow.pyfunc, "load_model",
                         lambda uri: type("M", (), {"predict": lambda self, x: [0]})())
-    monkeypatch.setattr(model_module.mlflow, "get_active_trace_id", lambda: None)
+    monkeypatch.setattr(model_module.mlflow, "get_active_trace_id", lambda: None, raising=False)
 
     def _capture_artifacts(local_dir, artifact_path, run_id=None):
         snapshot: dict[str, bytes] = {}
@@ -2348,7 +2348,7 @@ def test_verified_model_predict_subject_carries_run_id_and_decision_id(monkeypat
     monkeypatch.setattr(model_module, "artifact_checksums", lambda *a, **kw: {})
     monkeypatch.setattr(model_module.mlflow.pyfunc, "load_model",
                         lambda uri: type("M", (), {"predict": lambda self, x: [0]})())
-    monkeypatch.setattr(model_module.mlflow, "get_active_trace_id", lambda: None)
+    monkeypatch.setattr(model_module.mlflow, "get_active_trace_id", lambda: None, raising=False)
     monkeypatch.setattr(model_module.mlflow, "log_artifacts", lambda *a, **kw: None)
 
     class _FakeProofEngine:
@@ -2399,7 +2399,7 @@ def test_verified_model_predict_passes_metadata_into_payload(monkeypatch):
     monkeypatch.setattr(model_module, "artifact_checksums", lambda *a, **kw: {})
     monkeypatch.setattr(model_module.mlflow.pyfunc, "load_model",
                         lambda uri: type("M", (), {"predict": lambda self, x: [0]})())
-    monkeypatch.setattr(model_module.mlflow, "get_active_trace_id", lambda: None)
+    monkeypatch.setattr(model_module.mlflow, "get_active_trace_id", lambda: None, raising=False)
 
     class _FakeProofEngine:
         def create_commitment(self, *, payload_bytes, **kw):

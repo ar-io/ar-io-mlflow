@@ -32,18 +32,25 @@ jobs:
       - name: Run pytest
         run: pytest -v --tb=short
 
-  # Real-MLflow (non-mocked) integration gate, run against BOTH a 2.x and a
-  # 3.x install so MLflow-version support stays tested, not assumed. Exercises
-  # every plugin flow on a real tracking store: training anchor,
-  # ArioMlflowClient registration + promotion, VerifiedModel load + predict
-  # (incl. tamper rejection), full_verify with live source-of-truth refetch,
-  # and dataset anchoring (see docs/mlflow-v3-support.md).
+  # Real-MLflow (non-mocked) integration gate. Exercises every plugin flow on
+  # a real tracking store: training anchor, ArioMlflowClient registration +
+  # promotion, VerifiedModel load + predict + tamper rejection (all four
+  # models:/ URI forms), full_verify with live source-of-truth refetch,
+  # dataset anchoring, multi-model + multi-dataset, training-→-training chain
+  # (see docs/mlflow-v3-support.md).
+  #
+  # Matrix covers the *boundary* MLflow versions rather than just "latest each
+  # major" so regressions on the supported floor (2.14, declared in
+  # pyproject.toml) and the first 3.x release (3.0, when LoggedModel became
+  # first-class) are caught before users hit them. ``==2.14.*`` ships with a
+  # legacy ``setuptools`` API (``pkg_resources``) that newer setuptools (>=80)
+  # dropped — pinned in the install step so the import doesn't break.
   integration:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        mlflow: ["<3", ">=3"]
+        mlflow: ["==2.14.*", "==2.22.*", "==3.0.*", "==3.12.*"]
     steps:
       - uses: actions/checkout@v4
 
@@ -56,10 +63,17 @@ jobs:
       - name: Install plugin + test extras + MLflow ${{ matrix.mlflow }} + sklearn
         run: |
           python -m pip install --upgrade pip
+          # setuptools<80 still ships ``pkg_resources``, which mlflow 2.14
+          # imports at module load. Newer setuptools removed it. Harmless on
+          # 2.22+/3.x.
+          pip install "setuptools<80"
           pip install -e ".[test]" "mlflow${{ matrix.mlflow }}" scikit-learn
 
       - name: Report MLflow version
         run: python -c "import mlflow; print('MLflow', mlflow.__version__)"
+
+      - name: Run mocked suite (must be version-clean on every supported MLflow major)
+        run: pytest -q --tb=short
 
       - name: Run real-MLflow integration gate
         env:
