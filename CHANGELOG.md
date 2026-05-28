@@ -8,6 +8,67 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 _No changes yet._
 
+## [0.2.3] — 2026-05-28
+
+A targeted post-0.2.2 audit found that the v3 Phase B coverage missed
+two real `models:/` URI bugs and several edges the plan had flagged but
+never asserted. This release closes both.
+
+### Fixed
+
+- **`VerifiedModel("models:/<name>/<stage>")` on MLflow 3.x.** MLflow 3
+  dropped `current_stage` from `search_model_versions`'s valid attribute
+  grammar, so the resolver's native stage search raised
+  `MlflowException: Invalid attribute key 'current_stage'`, was swallowed,
+  and `VerifiedModel` then tried to `pyfunc.load_model("models:/<name>/<stage>")`
+  directly — which fails on v3 with "no MLmodel". `_resolve_model_version`
+  now falls back to `search_model_versions(name='<name>')` and filters by
+  `mv.current_stage` in Python, so v2 codebases that load by legacy stage URI
+  upgrade to MLflow 3 cleanly. Aliases remain the v3-native idiom; the
+  fallback is the bridge.
+- **`VerifiedModel("models:/<model_id>")` (v3-native LoggedModel URI).**
+  Before this fix, the resolver returned `None` for the single-segment v3
+  URI form, `VerifiedModel` silently skipped the integrity check
+  (`_artifact_verified=None`) and predictions chained at `GENESIS` instead
+  of the registration. The user got a working `VerifiedModel` with **no
+  integrity guarantee** — the worst kind of regression. `_resolve_model_version`
+  now calls `client.get_logged_model(<model_id>)` on v3 and synthesizes a
+  ModelVersion-shaped handle (with `run_id` / `source` / `name` / `version`)
+  so the integrity-check and predict paths run as on every other URI form.
+
+### Added — integration coverage for the edges Phase B left implicit
+
+`tests/test_mlflow3_integration.py` now also exercises (on both majors
+where applicable):
+
+- All four `models:/` URI forms through `VerifiedModel` — numeric, alias,
+  legacy stage (Python-side fallback on v3), and v3-native `models:/<model_id>`
+  (v3-gated). Each must produce `artifact_verified=True` end to end.
+- Multi-model-output guard — `_logged_model_paths()` enumerates every
+  model logged in a run on v3 via `run.outputs.model_outputs`, and
+  `anchor()` raises a clear `ValueError` when no `artifact_path` is
+  given, then succeeds with an explicit one.
+- Multi-dataset input — `_serialize_dataset_inputs` produces a stable
+  list of >1 dataset entries that round-trips identically through
+  `verify_source_of_truth` on both majors.
+- **Training-→-training chain** via the auto-register-at-log-time idiom
+  (`mlflow.<flavor>.log_model(name=..., registered_model_name=...)`).
+  This is the only realistic flow that produces a model version *before*
+  `anchor()` runs, which is what `_find_registered_model_for_run` needs
+  to write `ario.last_training_hash`. The README's separate-register
+  pattern can't chain training-→-training because no version exists at
+  anchor time; the auto-register pattern does, and this test pins it.
+  Documented in [`docs/mlflow-v3-support.md`](docs/mlflow-v3-support.md).
+
+### Documentation
+
+- `docs/mlflow-v3-support.md` updated with the two URI fixes, the audit
+  findings, and an explicit note that the training-→-training chain
+  requires the auto-register-at-log-time idiom (not the separate-register
+  pattern in older README examples). The verified behavior matrix now
+  includes rows for stage-search v3 attribute grammar and
+  `client.get_logged_model`.
+
 ## [0.2.2] — 2026-05-28
 
 ### Fixed

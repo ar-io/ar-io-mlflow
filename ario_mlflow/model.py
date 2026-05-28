@@ -9,6 +9,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from time import time
+from types import SimpleNamespace
 from typing import Any
 
 import mlflow
@@ -60,13 +61,99 @@ def _active_trace_id() -> str | None:
     return None
 
 
+def _resolve_logged_model(client, model_id: str):
+    """Resolve ``models:/<model_id>`` (v3-native LoggedModel) to a duck-typed
+    ModelVersion the rest of ``VerifiedModel`` can consume.
+
+    MLflow 3 makes models first-class ``LoggedModel`` entities — `log_model()`
+    returns a ``ModelInfo`` whose ``model_id`` is the canonical id, and
+    ``models:/<model_id>`` is the v3-native load URI. There's no registered
+    ModelVersion behind it (only a LoggedModel), so we synthesize the fields
+    ``VerifiedModel`` reads:
+
+    - ``name`` / ``version`` — the LoggedModel name + id (model_id stands in
+      for version since LoggedModel is its own identity).
+    - ``run_id`` / ``source`` — the source run id and the ``runs:/<rid>/<name>``
+      URI, which loads fine on v3 and feeds the integrity-check artifact path.
+    - ``tags = {}`` — there are no model-version registry tags here, so
+      predictions chain at ``GENESIS`` (correct: there's no registration to
+      chain to).
+
+    On MLflow 2.x ``client.get_logged_model`` doesn't exist; returns ``None``
+    silently so the caller falls through to the "not a v3 LoggedModel" path.
+    """
+    get_logged_model = getattr(client, "get_logged_model", None)
+    if get_logged_model is None:
+        return None
+    try:
+        lm = get_logged_model(model_id)
+    except Exception as e:  # noqa: BLE001 — not a valid model_id (or non-v3): caller treats as "couldn't resolve"
+        logger.debug(f"models:/{model_id}: not a LoggedModel id: {e}")
+        return None
+    source_run_id = getattr(lm, "source_run_id", None)
+    name = getattr(lm, "name", None)
+    if not source_run_id or not name:
+        return None
+    return SimpleNamespace(
+        name=name,
+        version=getattr(lm, "model_id", model_id),
+        run_id=source_run_id,
+        source=f"runs:/{source_run_id}/{name}",
+        tags={},
+    )
+
+
+def _resolve_stage_uri_v3_fallback(client, name: str, stage: str):
+    """Python-side fallback for ``models:/<name>/<stage>`` when v3 rejected
+    the native search.
+
+    MLflow 3 removed ``current_stage`` from
+    ``search_model_versions``'s valid attributes, so the v2 filter string
+    raises ``MlflowException: Invalid attribute key 'current_stage'``.
+    Stage transitions themselves still work (deprecated-but-functional) and
+    each ``ModelVersion`` still exposes ``current_stage`` — so we fetch all
+    versions of the registered model and filter in Python. Returns the most
+    recent version in the requested stage (matching v2 semantics).
+
+    Aliases are the v3-native idiom; this fallback is the bridge for v2
+    codebases that haven't migrated yet.
+    """
+    try:
+        results = client.search_model_versions(f"name='{name}'")
+    except Exception as e:  # noqa: BLE001 — even the fallback failed; surface None and the caller logs
+        logger.warning(
+            f"models:/{name}/{stage}: Python-side stage fallback failed: {e}"
+        )
+        return None
+    in_stage = [m for m in results if getattr(m, "current_stage", None) == stage]
+    if not in_stage:
+        return None
+    # search_model_versions returns latest-first, but the explicit sort
+    # makes the "most recent version in stage" invariant defensive against
+    # any future API ordering change.
+    in_stage.sort(key=lambda m: int(getattr(m, "version", 0)), reverse=True)
+    return in_stage[0]
+
+
 def _resolve_model_version(client, model_uri: str):
     """Resolve a ``models:/`` URI to a ``ModelVersion`` using the correct MLflow API.
 
-    Supports numeric versions (``models:/name/1``), aliases
-    (``models:/name@champion``), and legacy stage URIs
-    (``models:/name/Production``). Returns the resolved ``ModelVersion`` or
-    ``None`` if the URI cannot be parsed or the registry lookup fails.
+    Supports:
+
+    - ``models:/<name>/<version>`` — numeric version (both majors).
+    - ``models:/<name>@<alias>`` — registry alias (both majors; v3-native idiom).
+    - ``models:/<name>/<stage>`` — legacy stage URI. On v2, MLflow's
+      ``search_model_versions`` accepts ``current_stage`` directly. On v3 that
+      attribute is gone from the search grammar, so we filter all versions of
+      the registered model in Python. Stages are deprecated in 3.x — prefer
+      aliases for new code.
+    - ``models:/<model_id>`` — v3-native LoggedModel direct (no registered
+      version behind it; returns a duck-typed handle so integrity checking
+      still runs).
+
+    Returns the resolved ``ModelVersion``-shaped object or ``None`` if the URI
+    cannot be parsed or the registry lookup fails. ``None`` means
+    ``VerifiedModel`` will skip the integrity check and load the URI as-is.
     """
     if not model_uri.startswith("models:/"):
         return None
@@ -87,8 +174,15 @@ def _resolve_model_version(client, model_uri: str):
     parts = rest.split("/", 1)
     name = parts[0]
     suffix = parts[1] if len(parts) > 1 else ""
-    if not name or not suffix:
+    if not name:
         return None
+
+    # Single-segment URI: must be a v3 LoggedModel id (``models:/<model_id>``).
+    # MLflow doesn't have any other single-segment ``models:/`` form, so this
+    # is the right place to try ``get_logged_model``. On v2 the helper returns
+    # ``None`` and we fall through to the "couldn't resolve" path.
+    if not suffix:
+        return _resolve_logged_model(client, name)
 
     if suffix.isdigit():
         try:
@@ -97,14 +191,19 @@ def _resolve_model_version(client, model_uri: str):
             logger.warning(f"Could not resolve version {model_uri}: {e}")
             return None
 
-    # Stage URI (deprecated in MLflow 2.9+ but still supported).
+    # Stage URI (deprecated in MLflow 2.9+; the search-grammar accepts
+    # ``current_stage`` on v2 but not on v3 — fall back to a Python-side
+    # filter there).
     try:
         results = client.search_model_versions(
             f"name='{name}' and current_stage='{suffix}'"
         )
-    except Exception as e:  # noqa: BLE001 — stage search failures → None signals "couldn't resolve"
-        logger.warning(f"Could not resolve stage {model_uri}: {e}")
-        return None
+    except Exception as e:  # noqa: BLE001 — v3 rejects current_stage in the filter; try the Python-side fallback before giving up
+        logger.debug(
+            f"models:/{name}/{suffix}: native stage search failed "
+            f"({e}); trying Python-side fallback"
+        )
+        return _resolve_stage_uri_v3_fallback(client, name, suffix)
     if not results:
         return None
     # MLflow returns latest-first; take the most recent version in the stage.
