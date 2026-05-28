@@ -412,7 +412,7 @@ def _anchor_dataset_event(
         # Dataset events don't have a chain-head concept yet — every
         # dataset is its own GENESIS. Dataset versioning chain
         # (`previous_hash` linking older versions of the same dataset)
-        # is a deferred follow-up; see ROADMAP.
+        # is a deferred follow-up.
         previous_hash="GENESIS",
     )
 
