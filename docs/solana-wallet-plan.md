@@ -1,6 +1,8 @@
-# Solana wallet support — implementation plan
+# Solana wallet support — implementation plan (historical, shipped in 0.2.0)
 
-> **Status: plan for review + implementation.** Make the upload wallet default to **Solana** while keeping **Arweave RSA** fully working and user-selectable. Confined to the upload/funding layer — the Ed25519 *signing* key (`ProofEngine`, the envelope trust anchor) is unchanged, and so is the envelope/proof format. The verifier (`verify_record`) and cross-conformance with `ar-io-agent` are untouched.
+> **Status: HISTORICAL — fully shipped in 0.2.0 (2026-05-27).** This document was the design plan that drove the implementation; it's kept for reference but the live behavior is what the code, `README.md`, and CHANGELOG `[0.2.0]` describe today. New work shouldn't be specced against this doc — check `ario_mlflow/arweave.py` and the CHANGELOG first. The original plan text follows below.
+
+> **Original goal:** Make the upload wallet default to **Solana** while keeping **Arweave RSA** fully working and user-selectable. Confined to the upload/funding layer — the Ed25519 *signing* key (`ProofEngine`, the envelope trust anchor) is unchanged, and so is the envelope/proof format. The verifier (`verify_record`) and cross-conformance with `ar-io-agent` are untouched.
 
 ## 0. Why / what changes
 

@@ -138,8 +138,9 @@ signed what, not who *should* have.
 
 **Why not defended.** Provenance proves *what was committed*, not *that
 it was right*. Semantic verification (whether *this model* produced
-*this output* for *this input* correctly) is a separate problem and on
-the roadmap, not in v0.1.
+*this output* for *this input* correctly) is a separate problem the
+plugin intentionally doesn't solve — out of scope by design, not a
+pending feature.
 
 ### N5 — Fake compliance via "anchored garbage"
 
