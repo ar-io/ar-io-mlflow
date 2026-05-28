@@ -85,15 +85,18 @@ Internal field names (`signature_valid`, `hash_match`, `source_of_truth_ok`, `at
 
 ### MLflow version compatibility
 
-**MLflow 2.x (2.14+) and 3.x are both supported for the core anchor/verify (artifact-hashing) path** — verified on **real MLflow 2.22 and 3.12** via `tests/test_mlflow3_integration.py` (gated behind `ARIO_MLFLOW_INTEGRATION=1`), not just the mocked unit suite. See [`docs/mlflow-v3-support.md`](docs/mlflow-v3-support.md).
+**MLflow 2.x (2.14+) and 3.x are both fully supported** — every plugin flow (training anchor, `ArioMlflowClient` registration/promotion, `VerifiedModel` load+predict, full `verify` with live source-of-truth refetch, dataset anchoring) is integration-tested on **real MLflow 2.22 and 3.12** via `tests/test_mlflow3_integration.py` (gated behind `ARIO_MLFLOW_INTEGRATION=1`; CI runs it on both majors). See [`docs/mlflow-v3-support.md`](docs/mlflow-v3-support.md).
 
-**The one v3 difference that mattered (now fixed).** MLflow 3 makes models first-class `LoggedModel` entities ("beyond the run-centric approach" — v3.1.0 notes) and **drops the `mlflow.log-model.history` run tag**; the logged model is now in `run.outputs.model_outputs` (`LoggedModelOutput.model_id`) / `models:/<model_id>`. `_logged_model_paths()` now reads `run.outputs.model_outputs` → `get_logged_model(model_id).name` on v3, falling back to the tag on v2 — so model artifact-hash auto-resolution works on both. (Before the fix, a custom-named model on v3 fell back to `"model"`, which raised → its hash was silently skipped. This helper feeds both `anchor()` and the verify-side refetcher.)
+**The real cross-version differences the plugin handles** (do not regress these):
 
-**Not problems on 3.12** (an earlier draft wrongly claimed these — retracted): `mlflow.get_active_trace_id()` and `transition_model_version_stage` are both present (the latter deprecated-but-functional). **Deprecation to watch:** the filesystem tracking backend (`./mlruns`, the plugin/CLI default) is deprecated as of Feb 2026 — prefer a `sqlite:///…` backend for new setups.
+- **v3 — dropped `mlflow.log-model.history` run tag.** Models are first-class `LoggedModel` entities in v3; `_logged_model_paths()` reads `run.outputs.model_outputs` → `get_logged_model(model_id).name` on v3, falling back to the tag on v2. Before this fix, a custom-named model on v3 fell back to `"model"` and its hash was silently skipped — feeds both `anchor()` and the verify-side refetcher.
+- **v2 — `mlflow.get_active_trace_id` doesn't exist there.** It's a 3.x top-level helper. The `_active_trace_id()` shim in `model.py` falls back to `mlflow.get_current_active_span().request_id` on v2 (where `trace_id` is `None` and the id lives on `request_id`). Without this, predict-side trace correlation silently produced `None` on v2, breaking prediction source-of-truth verification.
+- **v2 — `mlflow.set_trace_tag` doesn't exist there either.** Use `MlflowClient().set_trace_tag` (works on both). `VerifiedModel` keeps a `self._mlflow_client` for this. Top-level `mlflow.set_trace_tag` is 3.x-only and was the silent cause of "no `ario.payload_json` trace tag → prediction verify check 3 always fails" on v2.
+- **v3 — trace info accessor moved.** `MlflowClient._tracing_client.get_trace_info` (tags-only, sidesteps v3's `mlflow.artifactLocation` requirement on `get_trace`) is preferred; `_fetch_trace_tags` in `verify.py` falls back to `client.get_trace` on v2 where the private attribute doesn't exist.
 
-**Not yet v3-integration-tested** (pass mocked unit tests on 3.x but lack dedicated real-MLflow-3 coverage — follow-up): registration/promotion (`ArioMlflowClient`), prediction (`VerifiedModel.predict`), full `verify_record`.
+**Deprecation to watch:** the filesystem tracking backend (`./mlruns`, the plugin/CLI default) is deprecated upstream as of Feb 2026 — prefer a `sqlite:///…` backend for new setups.
 
-Already-handled v3 path: prediction-side `verify_source_of_truth` uses `_tracing_client.get_trace_info` (tags-only) to sidestep MLflow 3.x's stricter `mlflow.artifactLocation` requirement on `client.get_trace()` — keep this path; do not switch back to `client.get_trace()`.
+**Known pre-existing limitation (not a v3 regression):** `anchor(dataset=ds)` expects an `mlflow.entities.Dataset` (entity-shaped: string `source_type`/`source`/`schema`), not a live `mlflow.data.from_numpy(...)` object whose `source` is a `DatasetSource` and which has no `source_type` string. The in-training path (via `run.inputs.dataset_inputs`) gives you the entity shape automatically. Standalone callers should extract the entity from a run input, or build an entity-shaped object.
 
 ## Conventions to preserve
 

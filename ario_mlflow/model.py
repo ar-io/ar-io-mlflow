@@ -25,6 +25,41 @@ class IntegrityError(Exception):
     """Raised when model artifacts fail integrity verification."""
 
 
+def _active_trace_id() -> str | None:
+    """Return the current MLflow trace id, across MLflow 2.x and 3.x.
+
+    MLflow renamed the in-span trace-id accessor between majors:
+
+    - **3.x** exposes ``mlflow.get_active_trace_id()`` (absent on 2.x).
+    - **2.x** has no such top-level helper *and* its top-level
+      ``get_last_active_trace_id()`` only populates *after* the span
+      closes — both return nothing while we're still inside the
+      ``@mlflow.trace`` ``predict`` span. The id is reachable only via the
+      active span object, where 2.x carries it as ``request_id``
+      (``trace_id`` is ``None`` on 2.x).
+
+    Without this shim, prediction proofs on MLflow 2.x omitted
+    ``mlflow_trace_id`` and never wrote the ``ario.payload_json`` trace
+    tag, so prediction source-of-truth verification silently failed on
+    2.x. Returns ``None`` only when tracing genuinely isn't active.
+    """
+    get_active = getattr(mlflow, "get_active_trace_id", None)
+    if get_active is not None:
+        try:
+            tid = get_active()
+            if tid:
+                return tid
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        span = mlflow.get_current_active_span()
+    except Exception:  # noqa: BLE001
+        span = None
+    if span is not None:
+        return getattr(span, "trace_id", None) or getattr(span, "request_id", None)
+    return None
+
+
 def _resolve_model_version(client, model_uri: str):
     """Resolve a ``models:/`` URI to a ``ModelVersion`` using the correct MLflow API.
 
@@ -171,6 +206,10 @@ class VerifiedModel:
         )
 
         client = mlflow.tracking.MlflowClient()
+        # Reused for trace-tag writes on the predict path. The top-level
+        # ``mlflow.set_trace_tag`` only exists on MLflow 3.x; the client
+        # method exists on both 2.x and 3.x.
+        self._mlflow_client = client
         self.model_name = "unknown"
         self.model_version = "unknown"
         self.run_id = "unknown"
@@ -361,11 +400,9 @@ class VerifiedModel:
         output_hash = hash_data(canonical_json({"prediction": pred_serializable}))
 
         # Capture MLflow trace_id (free correlation when @mlflow.trace
-        # span is active; OTel context flows in via metadata).
-        try:
-            trace_id = mlflow.get_active_trace_id()
-        except Exception:  # noqa: BLE001
-            trace_id = None
+        # span is active; OTel context flows in via metadata). Resolved
+        # across MLflow 2.x/3.x — see _active_trace_id.
+        trace_id = _active_trace_id()
 
         # Auto-capture OTel context when default-on. Caller-supplied
         # metadata={"otel_trace_id": ...} wins on collision via the merge
@@ -461,18 +498,18 @@ class VerifiedModel:
         # reads at audit time.
         if trace_id:
             try:
-                mlflow.set_trace_tag(
+                self._mlflow_client.set_trace_tag(
                     trace_id, "ario.payload_json", payload_bytes.decode("utf-8"),
                 )
-                mlflow.set_trace_tag(trace_id, "ario.decision_id", decision_id)
-                mlflow.set_trace_tag(trace_id, "ario.model_name", self.model_name)
-                mlflow.set_trace_tag(trace_id, "ario.model_version", self.model_version)
-                mlflow.set_trace_tag(trace_id, "ario.input_hash", input_hash)
-                mlflow.set_trace_tag(trace_id, "ario.output_hash", output_hash)
-                mlflow.set_trace_tag(trace_id, "ario.payload_hash", payload_hash)
-                mlflow.set_trace_tag(trace_id, "ario.proof_status", result.proof_status)
+                self._mlflow_client.set_trace_tag(trace_id, "ario.decision_id", decision_id)
+                self._mlflow_client.set_trace_tag(trace_id, "ario.model_name", self.model_name)
+                self._mlflow_client.set_trace_tag(trace_id, "ario.model_version", self.model_version)
+                self._mlflow_client.set_trace_tag(trace_id, "ario.input_hash", input_hash)
+                self._mlflow_client.set_trace_tag(trace_id, "ario.output_hash", output_hash)
+                self._mlflow_client.set_trace_tag(trace_id, "ario.payload_hash", payload_hash)
+                self._mlflow_client.set_trace_tag(trace_id, "ario.proof_status", result.proof_status)
                 if self._artifact_verified is not None:
-                    mlflow.set_trace_tag(
+                    self._mlflow_client.set_trace_tag(
                         trace_id, "ario.artifact_verified",
                         str(self._artifact_verified).lower(),
                     )
@@ -502,9 +539,9 @@ class VerifiedModel:
                 result.proof_status = "anchored"
                 if trace_id:
                     try:
-                        mlflow.set_trace_tag(trace_id, "ario.prediction_tx", anchor_result["tx_id"])
-                        mlflow.set_trace_tag(trace_id, "ario.arweave_url", anchor_result["url"])
-                        mlflow.set_trace_tag(trace_id, "ario.proof_status", "anchored")
+                        self._mlflow_client.set_trace_tag(trace_id, "ario.prediction_tx", anchor_result["tx_id"])
+                        self._mlflow_client.set_trace_tag(trace_id, "ario.arweave_url", anchor_result["url"])
+                        self._mlflow_client.set_trace_tag(trace_id, "ario.proof_status", "anchored")
                     except Exception as e:  # noqa: BLE001
                         logger.debug(
                             f"Could not update trace {trace_id} with anchor tags: {e}"
@@ -517,7 +554,7 @@ class VerifiedModel:
                 result.anchor_error = "upload returned no result"
                 if trace_id:
                     try:
-                        mlflow.set_trace_tag(trace_id, "ario.proof_status", "failed")
+                        self._mlflow_client.set_trace_tag(trace_id, "ario.proof_status", "failed")
                     except Exception as trace_error:  # noqa: BLE001
                         logger.debug(
                             f"Could not update trace {trace_id} with failed status: {trace_error}"
@@ -530,7 +567,7 @@ class VerifiedModel:
             result.anchor_error = str(e)
             if trace_id:
                 try:
-                    mlflow.set_trace_tag(trace_id, "ario.proof_status", "failed")
+                    self._mlflow_client.set_trace_tag(trace_id, "ario.proof_status", "failed")
                 except Exception as trace_error:  # noqa: BLE001
                     logger.debug(
                         f"Could not update trace {trace_id} with failed status: {trace_error}"
