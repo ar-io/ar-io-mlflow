@@ -8,6 +8,53 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 _No changes yet._
 
+## [0.2.2] — 2026-05-28
+
+### Fixed
+
+- **MLflow 2.x prediction-side trace correlation and verification.** Two
+  top-level MLflow APIs that the predict path used are 3.x-only and silently
+  raised `AttributeError` on 2.x, leaving prediction proofs without a usable
+  trace id and prediction source-of-truth verification permanently failing on
+  2.x despite the 0.1.0 changelog claiming the path "works on both 2.x and
+  3.x". Both surfaced via the new Phase B integration coverage on real
+  MLflow 2.22.
+
+  - **`mlflow.get_active_trace_id` is 3.x-only.** `VerifiedModel.predict`
+    now resolves the active trace id via a cross-version `_active_trace_id()`
+    shim that falls back to `mlflow.get_current_active_span().request_id` on
+    2.x (where `trace_id` is `None` and the id lives on `request_id`).
+    Without this, prediction payloads on 2.x omitted `mlflow_trace_id` and
+    `verify_source_of_truth` returned `live_refetch_incomplete`.
+  - **`mlflow.set_trace_tag` is 3.x-only too.** All prediction-path trace
+    tags (`ario.payload_json`, `ario.decision_id`, `ario.input_hash`,
+    `ario.output_hash`, `ario.payload_hash`, `ario.proof_status`,
+    `ario.prediction_tx`, etc.) now route through
+    `MlflowClient.set_trace_tag` (works on both majors) via a new
+    `VerifiedModel._mlflow_client`. Without this, none of these tags were
+    ever written on 2.x, so `ario.payload_json` was missing for verify and
+    check 3 always failed.
+
+### Added
+
+- **MLflow 2.x + 3.x integration coverage across every plugin flow.**
+  `tests/test_mlflow3_integration.py` now exercises the full plugin surface
+  on real MLflow tracking stores: `ArioMlflowClient` registration + promotion
+  with chain linkage (B1), `VerifiedModel` load-time integrity + per-prediction
+  anchoring + tamper rejection (B2), `full_verify` against live MLflow for
+  training / registration / prediction (B3, which surfaced the two fixes
+  above), and dataset anchoring — in-training and standalone (B4). The CI
+  `integration` matrix runs the file on `mlflow<3` and `mlflow>=3` so MLflow
+  version support stays tested rather than assumed.
+
+### Changed
+
+- **Docs: "fully supported" on both majors.** `README.md`, `CLAUDE.md`, and
+  `docs/mlflow-v3-support.md` now state plainly that MLflow 2.x (2.14+) and
+  3.x are both fully supported for every plugin flow, with the verified
+  behavior matrix and the cross-version API differences the plugin handles
+  documented in one place.
+
 ## [0.2.1] — 2026-05-27
 
 ### Fixed

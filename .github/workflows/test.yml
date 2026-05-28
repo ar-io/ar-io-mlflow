@@ -34,8 +34,10 @@ jobs:
 
   # Real-MLflow (non-mocked) integration gate, run against BOTH a 2.x and a
   # 3.x install so MLflow-version support stays tested, not assumed. Exercises
-  # the artifact-resolution path that differs between majors
-  # (see docs/mlflow-v3-support.md).
+  # every plugin flow on a real tracking store: training anchor,
+  # ArioMlflowClient registration + promotion, VerifiedModel load + predict
+  # (incl. tamper rejection), full_verify with live source-of-truth refetch,
+  # and dataset anchoring (see docs/mlflow-v3-support.md).
   integration:
     runs-on: ubuntu-latest
     strategy:

@@ -22,18 +22,22 @@ Python 3.10+. Pulls in MLflow, PyNaCl, the ar.io Turbo SDK, and `cryptography`.
 
 ### MLflow version compatibility
 
-**MLflow 2.x (2.14+) and 3.x are both supported** for the core anchor/verify
-path — verified on real MLflow 2.22 and 3.12. MLflow 3 makes models
-first-class `LoggedModel` entities and drops the run-level `log-model.history`
-tag; the plugin resolves logged models via `run.outputs.model_outputs` on v3
-(falling back to the tag on v2), so model artifact-hash auto-resolution works
-on both. Note: MLflow's filesystem tracking store (`./mlruns`, the default) is
-deprecated as of Feb 2026 — prefer a `sqlite:///…` backend for new setups.
-See [`docs/mlflow-v3-support.md`](docs/mlflow-v3-support.md) for the full v3
-picture (and which paths still need v3 integration coverage). One v3 change is
-already handled: prediction-side `verify_source_of_truth` reads trace tags via
-`_tracing_client.get_trace_info`, sidestepping MLflow 3.x's stricter
-`mlflow.artifactLocation` requirement on `client.get_trace()`.
+**MLflow 2.x (2.14+) and 3.x are both fully supported** — every plugin flow
+(training anchor, `ArioMlflowClient` registration/promotion, `VerifiedModel`
+load + predict, `verify_record` with live source-of-truth refetch, dataset
+anchoring) is integration-tested on real MLflow 2.22 and 3.12; CI runs the
+gate on both majors. The plugin handles the API surface differences both
+ways: v3-only changes (the dropped `mlflow.log-model.history` tag → models
+resolved via `run.outputs.model_outputs`; the lighter
+`_tracing_client.get_trace_info` for trace-tag refetch) **and** v2-only
+patterns (top-level `mlflow.get_active_trace_id` / `mlflow.set_trace_tag`
+don't exist on 2.x — the predict path falls back to the active span's
+`request_id` and writes trace tags via `MlflowClient.set_trace_tag`).
+
+Note: MLflow's filesystem tracking store (`./mlruns`, the default) is
+deprecated upstream as of Feb 2026 — prefer a `sqlite:///…` backend for new
+setups. See [`docs/mlflow-v3-support.md`](docs/mlflow-v3-support.md) for the
+verified behavior matrix and the v3 support history.
 
 ## Quickstart
 
