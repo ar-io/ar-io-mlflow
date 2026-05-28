@@ -29,6 +29,22 @@ fetches, and the optional ar.io Verify 4th check before each release.
   3.12** — the mocked suite is finally cross-version-clean instead of only
   cross-version-assumed.
 
+### Documentation
+
+- **README install instructions no longer claim "PyPI publish is on the
+  roadmap"** — `pip install ar-io-mlflow` has worked since 0.2.0 and is now
+  the documented primary path. Added the MLflow boundary-version list.
+- **`docs/mlflow-v3-support.md` status line** updated to reflect the boundary
+  CI matrix (2.14 / 2.22 / 3.0 / 3.12) rather than just 2.22 / 3.12.
+- **`docs/solana-wallet-plan.md` marked HISTORICAL** — that doc was the design
+  plan for 0.2.0 (Solana wallet support); kept for reference but new work
+  should be specced against the live code + CHANGELOG, not the plan doc.
+- **CHANGELOG `[0.1.0]` "Not yet published to PyPI" wording corrected** to
+  "(Pre-PyPI; 0.2.0 was the first published release.)"
+- **Threat model + README** clarified that semantic-verification is *out of
+  scope by design*, not "on the roadmap, not in v0.1" (deferred-feature
+  framing that hadn't been true for several releases).
+
 ### Added
 
 - **CI integration matrix now covers the boundary MLflow versions of each major**
@@ -263,7 +279,7 @@ pending).
 
 Initial alpha — covers the three integration points, dataset anchoring, the
 CLI verify/audit flow, the safety-and-packaging pass, and the network
-resilience pass. Not yet published to PyPI.
+resilience pass. (Pre-PyPI; 0.2.0 was the first published release.)
 
 ### Added — core API
 

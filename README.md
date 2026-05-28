@@ -12,13 +12,18 @@ or decision long after your MLflow server is gone.
 ## Install
 
 ```bash
-# From source — PyPI publish is on the roadmap
+pip install ar-io-mlflow
+```
+
+Or, to track main:
+
+```bash
 git clone https://github.com/ar-io/ar-io-mlflow.git
 cd ar-io-mlflow
 pip install -e .
 ```
 
-Python 3.10+. Pulls in MLflow, PyNaCl, the ar.io Turbo SDK, and `cryptography`.
+Python 3.10+. MLflow 2.14+ and 3.x both supported (boundary versions 2.14, 2.22, 3.0, 3.12 run in CI). Pulls in MLflow, PyNaCl, the ar.io Turbo SDK, and `cryptography`.
 
 ### MLflow version compatibility
 
@@ -472,7 +477,8 @@ third party against their public key (standard RSA-PSS SHA-256).
 
 These attestations cover **integrity and authenticity** of the anchored
 record. Semantic verification (whether *this model* produced *this output*
-on *this input*) is a separate problem and on the roadmap, not in v0.1.
+on *this input*) is a separate problem the plugin intentionally doesn't
+solve — out of scope by design, not a pending feature.
 
 ## Verifying without Python
 

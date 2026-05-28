@@ -1,6 +1,6 @@
 # MLflow 2.x + 3.x support — status & verified history
 
-> **Status: MLflow 2.x and 3.x are both fully supported.** Every plugin flow is integration-tested on real MLflow 2.22 and 3.12 — CI runs the gate on both majors. The v3 artifact-resolution fix shipped in 0.2.1; Phase B integration coverage and the two MLflow-2.x prediction-verification bug fixes shipped in 0.2.2; the post-audit URI-resolution fixes (legacy stage on v3, v3-native LoggedModel direct) shipped in 0.2.3.
+> **Status: MLflow 2.x and 3.x are both fully supported.** Every plugin flow is integration-tested on real MLflow at the **boundary versions of each major** — `==2.14.*` (the pyproject floor), `==2.22.*` (latest 2.x), `==3.0.*` (the first release where `LoggedModel` became first-class), and `==3.12.*` (latest 3.x) — and CI runs both the mocked unit suite (now version-clean across all four) and the real-MLflow integration gate on every matrix entry. The v3 artifact-resolution fix shipped in 0.2.1; Phase B integration coverage and the two MLflow-2.x prediction-verification bug fixes shipped in 0.2.2; the post-audit URI-resolution fixes (legacy stage on v3, v3-native LoggedModel direct) shipped in 0.2.3; the cross-version mocked-suite cleanup + boundary CI matrix + live-network smoke shipped in 0.2.4.
 
 ## Sources (verified, not inferred)
 
@@ -70,6 +70,14 @@ A focused post-0.2.2 review probed v3-sensitive edges Phase B had assumed-correc
 - **Multi-model `_logged_model_paths`** and the `anchor()` disambiguation `ValueError` — tested on both majors.
 - **Multi-dataset input** — `_serialize_dataset_inputs` round-trips through `verify_source_of_truth` for >1 input.
 - **Training-→-training chain** via `log_model(registered_model_name=…)` auto-register — pinned. The README's separate-register pattern can't chain training-→-training; the auto-register idiom can, and is the documented path going forward.
+
+### Ship-readiness pass — boundary CI matrix + mocked-suite cross-version cleanup + live-network smoke · ✅ shipped in 0.2.4
+A pre-release audit ("are we sure we're ready to ship to devs?") closed the last four gaps the prior phases left:
+
+- **Mocked unit suite is finally cross-version-clean.** Eleven `monkeypatch.setattr(mlflow, "get_active_trace_id", …)` sites across `tests/test_plugin_smoke.py` and `tests/test_input_anchoring.py` were missing `raising=False`, so they `AttributeError`'d on MLflow 2.x and surfaced as ~22 failures every run. The plugin's own product code already handled the absence via `_active_trace_id()`; only the tests needed the fix. **178/178 mocked tests now pass on real MLflow 2.14, 2.22, 3.0, and 3.12.**
+- **Boundary CI matrix.** The integration job now runs against `==2.14.*`, `==2.22.*`, `==3.0.*`, and `==3.12.*` rather than just "latest of each." Same job also runs the mocked suite so the cleanliness above stays asserted.
+- **Live-network smoke** (`tests/test_live_network.py`) gated behind `ARIO_MLFLOW_LIVE_NETWORK=1` — covers real Turbo upload → multi-gateway fetch → signature-verify round trip, `verify_proof_by_tx` against a fresh upload, multi-gateway fetch fallback, and the optional ar.io Verify 4th check. Tests skip cleanly when the wallet is unfunded.
+- **Manual `workflow_dispatch` workflow** (`.github/workflows/live-network.yml`) so maintainers can trigger the live smoke pre-release with a funded-wallet secret.
 
 ### Phase D — future-proofing (deprecations, NOT current breaks) · defer
 - **Aliases for promotion** — before MLflow eventually removes stages (still functional + deprecated on 3.12).
