@@ -8,6 +8,55 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 _No changes yet._
 
+## [0.2.4] — 2026-05-28
+
+Ship-readiness pass: makes the mocked unit suite cross-version-clean, broadens the
+real-MLflow CI matrix to the **boundary** versions of each major (not just latest),
+and adds an opt-in **live-network smoke** suite + manual GitHub Actions workflow so
+maintainers have an end-to-end path that exercises real Arweave uploads, gateway
+fetches, and the optional ar.io Verify 4th check before each release.
+
+### Fixed
+
+- **22 mocked unit-test failures on MLflow 2.x.** Eleven
+  ``monkeypatch.setattr(mlflow, "get_active_trace_id", …)`` sites (across
+  `tests/test_plugin_smoke.py` and `tests/test_input_anchoring.py`) didn't pass
+  ``raising=False``, so they raised `AttributeError` on MLflow 2.x where the
+  top-level helper is absent — every test that touched the predict path failed.
+  All sites now pass `raising=False`; the plugin's existing
+  `_active_trace_id()` shim handles the fallback in the actual product code.
+  **Result: 178/178 mocked tests now pass on real MLflow 2.14, 2.22, 3.0, and
+  3.12** — the mocked suite is finally cross-version-clean instead of only
+  cross-version-assumed.
+
+### Added
+
+- **CI integration matrix now covers the boundary MLflow versions of each major**
+  (`==2.14.*`, `==2.22.*`, `==3.0.*`, `==3.12.*`) rather than just "latest each."
+  Catches regressions on the pyproject floor (2.14) and the first 3.x release
+  (3.0, when LoggedModel became first-class) before users hit them. The same job
+  also runs the mocked suite on each version so the cross-version cleanliness
+  established above stays asserted, not assumed. (2.14 needs `setuptools<80` to
+  keep `pkg_resources` importable; pinned in the install step.)
+- **Live-network smoke test suite** (`tests/test_live_network.py`) gated behind
+  `ARIO_MLFLOW_LIVE_NETWORK=1`. Covers the path the rest of the suite can't:
+  - wallet construction against the production resolution rules,
+  - real Turbo upload → multi-gateway fetch → signature-verify round trip,
+  - `verify_proof_by_tx` against a freshly anchored TX,
+  - multi-gateway fetch fallback when the primary is unreachable,
+  - the optional ar.io Verify 4th check (gated additionally on
+    `ARIO_MLFLOW_ARIO_VERIFY_URL`).
+
+  Tests skip cleanly (not fail) when the wallet is unfunded — auto-generated
+  Solana wallets surface "insufficient credits" via `anchor.last_error` and the
+  suite distinguishes that from a real upload failure.
+- **Manual `workflow_dispatch` CI workflow** (`.github/workflows/live-network.yml`)
+  that maintainers can trigger pre-release. Accepts the wallet contents via a
+  repository secret (`ARIO_MLFLOW_LIVE_WALLET_JSON`, Solana id.json array or
+  Arweave RSA JWK) and an optional ar.io Verify URL secret
+  (`ARIO_MLFLOW_LIVE_ARIO_VERIFY_URL`). Without the wallet secret the funded tests
+  skip with an actionable message rather than failing.
+
 ## [0.2.3] — 2026-05-28
 
 A targeted post-0.2.2 audit found that the v3 Phase B coverage missed

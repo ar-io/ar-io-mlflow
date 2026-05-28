@@ -130,7 +130,7 @@ def _patch_anchor_env(monkeypatch, run, *, anchor=None):
         lambda: _FakeMlflowClient(run),
     )
     monkeypatch.setattr(anchoring.mlflow, "log_artifacts", lambda *a, **kw: None)
-    monkeypatch.setattr(anchoring.mlflow, "get_active_trace_id", lambda: None)
+    monkeypatch.setattr(anchoring.mlflow, "get_active_trace_id", lambda: None, raising=False)
     monkeypatch.setattr(anchoring.mlflow, "get_tracking_uri", lambda: "file:./mlruns")
     monkeypatch.setattr(
         anchoring, "artifact_checksums",
@@ -453,7 +453,7 @@ def _patch_anchor_env_with_set_tag(monkeypatch, run, *, captured_tags=None):
         lambda: _CapturingMlflowClient(run),
     )
     monkeypatch.setattr(anchoring.mlflow, "log_artifacts", lambda *a, **kw: None)
-    monkeypatch.setattr(anchoring.mlflow, "get_active_trace_id", lambda: None)
+    monkeypatch.setattr(anchoring.mlflow, "get_active_trace_id", lambda: None, raising=False)
     monkeypatch.setattr(anchoring.mlflow, "get_tracking_uri", lambda: "file:./mlruns")
     monkeypatch.setattr(
         anchoring, "artifact_checksums",
