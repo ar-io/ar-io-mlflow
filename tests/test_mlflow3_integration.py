@@ -14,8 +14,16 @@ tests below exist to *prove* that across the full plugin flows, not assume it.
 
 Coverage:
   - ``_logged_model_paths`` / ``artifact_checksums`` — the v3 fix (Phase A).
-  - ``ArioMlflowClient`` registration + promotion, with the chain links and
-    artifact-integrity match end to end (Phase B1).
+  - ``ArioMlflowClient`` registration + promotion, ``VerifiedModel`` load +
+    predict + tamper rejection, ``full_verify`` across event types, dataset
+    anchoring (Phase B).
+  - All four ``models:/`` URI forms through ``VerifiedModel``: numeric, alias,
+    legacy stage (Python-side fallback on v3 where ``current_stage`` was
+    dropped from the search grammar), and v3-native ``models:/<model_id>``
+    (the LoggedModel direct form; v3-gated).
+  - Multi-model-output guard in ``anchor()``, multi-dataset-input
+    serialization, and the training-→-training chain via the
+    ``log_model(registered_model_name=…)`` auto-register idiom.
 
 No network: the ``ArioMlflowClient`` tests inject a stub anchor that returns
 deterministic fake upload results, so the full tag-writing + chaining + artifact
@@ -523,3 +531,253 @@ def test_standalone_dataset_event_signed_and_verifiable(tmp_path):
     assert result["payload"]["name"] == "fraud_train_q1"
     assert result["payload"]["source_type"] == "local"
     assert verify_signature(env, ProofEngine())["ok"]
+
+
+# --------------------------------------------------------------------------- #
+# Additional v3 surface coverage (URI forms, multi-model, multi-dataset,
+# training-→-training chain). These exist because they were probed once and
+# then forgotten; the integration suite is the place to nail them down.
+# --------------------------------------------------------------------------- #
+
+
+def _setup_registered(tmp_path):
+    """Train + log + anchor + register + alias + transition to Production.
+
+    Returns ``(client, name, version, run_id, info, stub)``. ``info`` is the
+    ``ModelInfo`` returned by ``log_model`` so v3-only callers can read
+    ``info.model_id``.
+    """
+    import mlflow
+    import mlflow.sklearn
+    from sklearn.linear_model import LogisticRegression
+
+    from ario_mlflow.anchoring import anchor
+    from ario_mlflow.client import ArioMlflowClient
+    from ario_mlflow.proof import ProofEngine
+
+    mlflow.set_tracking_uri((tmp_path / "mlruns").as_uri())
+    mlflow.set_experiment("uris")
+    pe, stub = ProofEngine(), _StubAnchor()
+    with mlflow.start_run() as run:
+        clf = LogisticRegression(max_iter=20).fit([[0, 0], [1, 1]], [0, 1])
+        try:
+            info = mlflow.sklearn.log_model(clf, name="m")
+        except TypeError:
+            info = mlflow.sklearn.log_model(clf, artifact_path="m")
+        anchor(proof_engine=pe, arweave=stub, allow_empty_dataset_inputs=True)
+        run_id = run.info.run_id
+
+    name = "URI_M"
+    client = ArioMlflowClient(proof_engine=pe, anchor=stub)
+    client.create_registered_model(name)
+    mv = client.create_model_version(name, f"runs:/{run_id}/m", run_id=run_id)
+    client.wait_for_anchor("registration", name, mv.version, timeout=30)
+    client.set_registered_model_alias(name, "champion", mv.version)
+    client.transition_model_version_stage(name, mv.version, "Production")
+    client.wait_for_anchor("promotion", name, mv.version, timeout=30)
+    return client, name, mv.version, run_id, info, stub, pe
+
+
+def test_verified_model_alias_uri(tmp_path):
+    """`models:/<name>@<alias>` — v3-native idiom, must integrity-verify on
+    both majors. Aliases are how v3 users will promote models once stages are
+    fully gone; this test stays green as MLflow deprecates further."""
+    from ario_mlflow.model import VerifiedModel
+
+    client, name, version, run_id, _info, stub, pe = _setup_registered(tmp_path)
+    vm = VerifiedModel(f"models:/{name}@champion", proof_engine=pe, anchor=stub)
+    print(f"\n[integration] major={_mlflow_major()} alias artifact_verified={vm._artifact_verified}")
+    assert vm._artifact_verified is True
+    assert vm.run_id == run_id
+
+
+def test_verified_model_legacy_stage_uri(tmp_path):
+    """`models:/<name>/<stage>` — legacy v2 idiom. Native search works on v2;
+    on v3 the search grammar dropped ``current_stage`` so the resolver falls
+    back to a Python-side filter. End-to-end integrity check must hold on
+    both majors so v2 codebases can upgrade to MLflow 3 without rewriting
+    every load URI in the same change."""
+    from ario_mlflow.model import VerifiedModel
+
+    client, name, version, run_id, _info, stub, pe = _setup_registered(tmp_path)
+    vm = VerifiedModel(f"models:/{name}/Production", proof_engine=pe, anchor=stub)
+    print(
+        f"\n[integration] major={_mlflow_major()} stage URI artifact_verified="
+        f"{vm._artifact_verified}"
+    )
+    assert vm._artifact_verified is True
+    assert vm.run_id == run_id
+
+
+def test_verified_model_logged_model_id_uri_v3(tmp_path):
+    """`models:/<model_id>` — v3-native LoggedModel direct. Before the
+    resolver learned about LoggedModel ids, ``VerifiedModel`` silently
+    degraded on this URI (no integrity check, GENESIS chain). Skipped on v2
+    where ``ModelInfo.model_id`` doesn't exist."""
+    if _mlflow_major() < 3:
+        pytest.skip("models:/<model_id> is a v3-only URI form")
+    from ario_mlflow.model import VerifiedModel
+
+    client, _name, _version, run_id, info, stub, pe = _setup_registered(tmp_path)
+    lm_id = info.model_id
+    vm = VerifiedModel(f"models:/{lm_id}", proof_engine=pe, anchor=stub)
+    print(
+        f"\n[integration] major={_mlflow_major()} models:/<model_id> "
+        f"run_id={vm.run_id} artifact_verified={vm._artifact_verified}"
+    )
+    assert vm._artifact_verified is True, (
+        "LoggedModel-direct integrity verification did not run — the resolver "
+        "regressed and is treating models:/<model_id> as unresolvable again"
+    )
+    assert vm.run_id == run_id
+
+
+def test_anchor_raises_on_multi_model_run_without_explicit_path(tmp_path):
+    """`_logged_model_paths()` enumerates every logged model — when a run has
+    >1, ``anchor()`` must raise ``ValueError`` rather than silently picking
+    one. Verifies the disambiguation guard on both majors and that the v3
+    `run.outputs.model_outputs` path still produces the full list."""
+    import mlflow
+    import mlflow.sklearn
+    from sklearn.linear_model import LogisticRegression
+
+    from ario_mlflow.anchoring import _logged_model_paths, anchor
+    from ario_mlflow.proof import ProofEngine
+
+    mlflow.set_tracking_uri((tmp_path / "mlruns").as_uri())
+    mlflow.set_experiment("multi-model")
+    pe, stub = ProofEngine(), _StubAnchor()
+    with mlflow.start_run() as run:
+        clf = LogisticRegression(max_iter=20).fit([[0, 0], [1, 1]], [0, 1])
+        for n in ("model_a", "model_b"):
+            try:
+                mlflow.sklearn.log_model(clf, name=n)
+            except TypeError:
+                mlflow.sklearn.log_model(clf, artifact_path=n)
+        rid = run.info.run_id
+
+        r = mlflow.tracking.MlflowClient().get_run(rid)
+        paths = set(_logged_model_paths(r))
+        print(f"\n[integration] major={_mlflow_major()} multi-model paths={paths}")
+        assert paths == {"model_a", "model_b"}
+
+        with pytest.raises(ValueError, match="multiple model artifact paths"):
+            anchor(proof_engine=pe, arweave=stub, allow_empty_dataset_inputs=True)
+
+        # Explicit artifact_path disambiguates and anchors successfully.
+        res = anchor(
+            proof_engine=pe, arweave=stub,
+            artifact_path="model_b", allow_empty_dataset_inputs=True,
+        )
+        assert res["envelope"]["event_type"] == "training_complete"
+
+
+def test_anchor_with_multi_dataset_inputs(tmp_path):
+    """A training run with multiple ``log_input`` calls must serialize every
+    dataset into the canonical payload (sorted deterministically by
+    ``_serialize_dataset_inputs``) and full_verify must re-derive the same
+    list from live MLflow on both majors — proves the v3
+    ``run.inputs.dataset_inputs`` shape round-trips identically."""
+    import mlflow
+    import mlflow.data
+    import mlflow.sklearn
+    import numpy as np
+    from sklearn.linear_model import LogisticRegression
+
+    from ario_mlflow.anchoring import anchor
+    from ario_mlflow.proof import ProofEngine
+    from ario_mlflow.verify import full_verify
+
+    mlflow.set_tracking_uri((tmp_path / "mlruns").as_uri())
+    mlflow.set_experiment("multi-ds")
+    pe, stub = ProofEngine(), _StubAnchor()
+    ds_train = mlflow.data.from_numpy(
+        np.array([[0, 0], [1, 1]]), targets=np.array([0, 1]),
+        source="train.csv", name="train_q1",
+    )
+    ds_val = mlflow.data.from_numpy(
+        np.array([[0, 1], [1, 0]]), targets=np.array([0, 1]),
+        source="val.csv", name="val_q1",
+    )
+    with mlflow.start_run() as run:
+        mlflow.log_input(ds_train, context="training")
+        mlflow.log_input(ds_val, context="validation")
+        clf = LogisticRegression(max_iter=20).fit([[0, 0], [1, 1]], [0, 1])
+        try:
+            mlflow.sklearn.log_model(clf, name="m")
+        except TypeError:
+            mlflow.sklearn.log_model(clf, artifact_path="m")
+        anchor(proof_engine=pe, arweave=stub)
+        run_id = run.info.run_id
+
+    training_env = next(e for e in stub.uploaded if e["event_type"] == "training_complete")
+    dataset_envs = [e for e in stub.uploaded if e["event_type"] == "dataset"]
+    print(
+        f"\n[integration] major={_mlflow_major()} dataset_events={len(dataset_envs)}"
+    )
+    assert len(dataset_envs) == 2, (
+        f"expected one dataset envelope per logged input, got {len(dataset_envs)}"
+    )
+
+    res = full_verify(training_env, proof_engine=ProofEngine(),
+                      mlflow_client=mlflow.tracking.MlflowClient())
+    assert res["overall"] is True, res
+    payload = json.loads(res["anchored_bytes"]["payload_bytes"])
+    names = sorted(d["name"] for d in payload["dataset_inputs"])
+    assert names == ["train_q1", "val_q1"], (
+        f"multi-dataset payload didn't include both inputs on major "
+        f"{_mlflow_major()}: {names}"
+    )
+
+
+def test_training_to_training_chain_via_auto_register(tmp_path):
+    """The training-→-training chain (``ario.last_training_hash`` on the
+    registered model) only fires when a model version exists for the current
+    run at ``anchor()`` time. The realistic path that produces this is
+    ``mlflow.<flavor>.log_model(name=…, registered_model_name=…)`` (the
+    auto-register-at-log-time idiom) — the README's separate-register flow
+    cannot chain training-→-training because no version exists yet when
+    ``anchor()`` runs. This test pins the auto-register path on both majors."""
+    import mlflow
+    import mlflow.sklearn
+    from sklearn.linear_model import LogisticRegression
+
+    from ario_mlflow.anchoring import TAG_LAST_TRAINING_HASH, anchor
+    from ario_mlflow.proof import ProofEngine
+
+    mlflow.set_tracking_uri((tmp_path / "mlruns").as_uri())
+    mlflow.set_experiment("chain")
+    pe, stub = ProofEngine(), _StubAnchor()
+    rm_name = "ChainModel"
+
+    def _train_round(round_idx: int):
+        with mlflow.start_run() as run:
+            clf = LogisticRegression(max_iter=20).fit(
+                [[0, round_idx % 2], [1, 1]], [0, 1],
+            )
+            mlflow.log_param("round", round_idx)
+            try:
+                mlflow.sklearn.log_model(clf, name="m", registered_model_name=rm_name)
+            except TypeError:
+                mlflow.sklearn.log_model(
+                    clf, artifact_path="m", registered_model_name=rm_name,
+                )
+            res = anchor(proof_engine=pe, arweave=stub, allow_empty_dataset_inputs=True)
+        return res
+
+    r1 = _train_round(1)
+    r2 = _train_round(2)
+
+    mc = mlflow.tracking.MlflowClient()
+    head_after_r2 = mc.get_registered_model(rm_name).tags.get(TAG_LAST_TRAINING_HASH)
+    print(
+        f"\n[integration] major={_mlflow_major()} chain: r1.payload_hash="
+        f"{r1['payload_hash'][:16]}.. r2.previous_hash="
+        f"{r2['envelope']['previous_hash'][:16]}.. head={head_after_r2[:16] if head_after_r2 else None}"
+    )
+    assert r2["envelope"]["previous_hash"] == r1["payload_hash"], (
+        "second training run did not chain to the first via ario.last_training_hash"
+    )
+    assert head_after_r2 == r2["payload_hash"], (
+        "ario.last_training_hash on registered model not updated after r2"
+    )

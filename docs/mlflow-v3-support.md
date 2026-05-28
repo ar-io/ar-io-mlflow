@@ -1,6 +1,6 @@
 # MLflow 2.x + 3.x support — status & verified history
 
-> **Status: MLflow 2.x and 3.x are both fully supported.** Every plugin flow is integration-tested on real MLflow 2.22 and 3.12 — CI runs the gate on both majors. The v3 artifact-resolution fix shipped in 0.2.1; Phase B integration coverage and the two MLflow-2.x prediction-verification bug fixes that coverage surfaced shipped in 0.2.2.
+> **Status: MLflow 2.x and 3.x are both fully supported.** Every plugin flow is integration-tested on real MLflow 2.22 and 3.12 — CI runs the gate on both majors. The v3 artifact-resolution fix shipped in 0.2.1; Phase B integration coverage and the two MLflow-2.x prediction-verification bug fixes shipped in 0.2.2; the post-audit URI-resolution fixes (legacy stage on v3, v3-native LoggedModel direct) shipped in 0.2.3.
 
 ## Sources (verified, not inferred)
 
@@ -30,6 +30,9 @@
 | `MlflowClient._tracing_client.get_trace_info` | **absent** | ✓ | Verify's `_fetch_trace_tags` falls back to `client.get_trace` on v2 — already handled. |
 | `run.inputs.dataset_inputs` (entity-shaped) | ✓ | ✓ | `_serialize_dataset_inputs` round-trips through `verify_source_of_truth` on both majors. |
 | Filesystem tracking store (`./mlruns`, the default) | ✓ | ✓ (deprecated) | Deprecated upstream Feb 2026 → prefer `sqlite:///…`. |
+| `search_model_versions("name='…' and current_stage='…'")` (legacy stage URI resolver) | ✓ | **rejected** | v3 dropped `current_stage` from the search grammar → fixed in 0.2.3 (Python-side fallback enumerates versions, filters by `mv.current_stage`). |
+| `MlflowClient.get_logged_model` (`models:/<model_id>` v3-native URI) | **absent** | ✓ | The LoggedModel direct URI. Added in 0.2.3 to `_resolve_model_version` so `VerifiedModel` integrity-verifies this form too instead of silently degrading. |
+| `mlflow.<flavor>.log_model(..., registered_model_name=…)` auto-register-at-log-time | ✓ | ✓ | Creates a model version for the current run *before* `anchor()` returns — the only flow that produces a usable `_find_registered_model_for_run` lookup, and therefore the only flow where the `ario.last_training_hash` chain head fires. The README's separate-register pattern can't chain training-→-training; the auto-register pattern can. |
 
 ## Phases — history
 
@@ -57,6 +60,16 @@ Both were silently failing despite the 0.1.0 CHANGELOG claiming prediction verif
 - CI `integration` matrix already runs `tests/test_mlflow3_integration.py` on `mlflow<3` and `mlflow>=3` — picks up B1–B4 automatically.
 - Docs (this file + README + CLAUDE.md) flipped to "**MLflow 2.x and 3.x are both fully supported.**"
 - Released as `0.2.2` (patch — the only behavior changes were bug fixes for MLflow-2.x predict-side verification that had never worked).
+
+### Post-audit — URI-resolution fixes + edge coverage · ✅ shipped in 0.2.3
+A focused post-0.2.2 review probed v3-sensitive edges Phase B had assumed-correct without asserting. Two real `models:/` URI bugs surfaced and were fixed in `_resolve_model_version` (`ario_mlflow/model.py`); the integration suite grew six tests so the next change can't silently regress what 0.2.3 just nailed down:
+
+- **Stage URI on v3** — native `current_stage` search rejected; Python-side fallback added.
+- **`models:/<model_id>` on v3** — handled via `client.get_logged_model`; integrity check now runs (previously silently skipped).
+- **All four `models:/` URI forms** through `VerifiedModel` get a dedicated test now (numeric, alias, stage, LoggedModel-id v3-only).
+- **Multi-model `_logged_model_paths`** and the `anchor()` disambiguation `ValueError` — tested on both majors.
+- **Multi-dataset input** — `_serialize_dataset_inputs` round-trips through `verify_source_of_truth` for >1 input.
+- **Training-→-training chain** via `log_model(registered_model_name=…)` auto-register — pinned. The README's separate-register pattern can't chain training-→-training; the auto-register idiom can, and is the documented path going forward.
 
 ### Phase D — future-proofing (deprecations, NOT current breaks) · defer
 - **Aliases for promotion** — before MLflow eventually removes stages (still functional + deprecated on 3.12).
