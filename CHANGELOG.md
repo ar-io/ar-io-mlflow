@@ -23,6 +23,25 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `VerifyStatusTransportError`, and `VerifyStatusLicenseError` (api-guard's
   `503 license required`, carrying `upgrade_url`). The §9.1 outcome→exception
   mapping lives in `errors.exception_for_status`.
+- **`VerifiedModel` agent verify-status gate** — new optional keyword-only
+  arguments `asset_id=`, `verify_status_client=`, `on_failure=` on
+  `VerifiedModel.__init__`. When provided, the agent gate runs **first** (before
+  the artifact integrity check and before any MLflow access — fail fast, one
+  cheap local HTTP call) and refuses to load a model whose covering asset is
+  tampered/missing/stale/unknown per the contract §9.1 mapping. `on_failure`:
+  `"raise"` (default) and `"fail_closed"` raise the typed exception;
+  `"fail_open"` logs at WARN with structured SIEM fields
+  (`extra["ario_verify_status"]`: asset_id, outcome, stale, policy_hash,
+  current_tx_id) and proceeds. Absent the new kwargs, behavior is byte-for-byte
+  unchanged. Gating is load-time only in this release; per-predict re-checking
+  (contract §9.2's 10–30s cache cadence) is a planned follow-up.
+
+### Changed
+
+- `IntegrityError` now subclasses `ario_mlflow.errors.AssetVerificationError`
+  (previously bare `Exception`; backward-compatible) so one
+  `except AssetVerificationError` clause catches both load-time gates —
+  artifact re-hash and agent verify-status.
 
 ## [0.2.4] — 2026-05-28
 

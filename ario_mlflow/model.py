@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from time import time
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import mlflow
 import numpy as np
@@ -18,12 +18,28 @@ import numpy as np
 from ario_mlflow.proof import ProofEngine, canonical_json, hash_data
 from ario_mlflow.arweave import ArweaveAnchor
 from ario_mlflow.anchoring import artifact_checksums, parse_runs_uri, capture_otel_context
+from ario_mlflow.errors import (
+    AssetVerificationError,
+    VerifyStatusError,
+    exception_for_status,
+)
+
+if TYPE_CHECKING:
+    from ario_mlflow.verify_status_client import VerifyStatus, VerifyStatusClient
 
 logger = logging.getLogger(__name__)
 
+#: Valid values for VerifiedModel's on_failure gate policy.
+ON_FAILURE_MODES = ("raise", "fail_closed", "fail_open")
 
-class IntegrityError(Exception):
-    """Raised when model artifacts fail integrity verification."""
+
+class IntegrityError(AssetVerificationError):
+    """Raised when model artifacts fail integrity verification.
+
+    Subclasses :class:`~ario_mlflow.errors.AssetVerificationError` so one
+    ``except AssetVerificationError`` clause catches both load-time gates
+    (artifact re-hash and the agent verify-status check).
+    """
 
 
 def _active_trace_id() -> str | None:
@@ -268,6 +284,10 @@ class VerifiedModel:
         model_uri: str,
         proof_engine: ProofEngine | None = None,
         anchor: ArweaveAnchor | None = None,
+        *,
+        asset_id: str | None = None,
+        verify_status_client: "VerifyStatusClient | None" = None,
+        on_failure: str = "raise",
     ):
         """Load an MLflow model and verify its artifacts against the anchored hash.
 
@@ -277,6 +297,23 @@ class VerifiedModel:
         :func:`mlflow.pyfunc.load_model`, so a tampered artifact is rejected
         before any user code (``PythonModel`` subclasses, custom loaders) can
         execute.
+
+        When ``asset_id`` + ``verify_status_client`` are provided, an
+        **agent verify-status gate** additionally runs first — before the
+        artifact integrity check and before any MLflow access (one cheap
+        local HTTP call; fail fast before paying for artifact downloads).
+        It consults ar-io-agent's ``GET /v1/verify-status/<asset_id>`` and
+        applies the ``on_failure`` policy to the §9.1 outcome mapping:
+        ``tampered`` → :class:`~ario_mlflow.errors.AssetTamperedError`,
+        ``missing`` → :class:`~ario_mlflow.errors.AssetMissingError`,
+        ``unavailable`` or ``verified``-but-stale →
+        :class:`~ario_mlflow.errors.AssetStaleError`, ``unknown`` →
+        :class:`~ario_mlflow.errors.AssetUnknownError`. Transport-level
+        failures (:class:`~ario_mlflow.errors.VerifyStatusTransportError`
+        etc.) fall under the same policy. The gate runs at **load time
+        only** — a tamper detected by the agent *after* this constructor
+        returns is not re-checked on ``predict()`` (per-predict re-checking
+        with the contract's 10–30s cache guidance is a planned follow-up).
 
         Args:
             model_uri: A ``models:/`` URI in any of these forms:
@@ -291,12 +328,48 @@ class VerifiedModel:
                 :class:`ArweaveAnchor` configured from the
                 ``ARIO_MLFLOW_ARWEAVE_WALLET`` /
                 ``ARIO_MLFLOW_GATEWAY_HOST`` env vars.
+            asset_id: The ar-io-agent policy asset_id covering this model's
+                artifacts. Requires ``verify_status_client``.
+            verify_status_client: A
+                :class:`~ario_mlflow.verify_status_client.VerifyStatusClient`
+                pointed at the agent's management port (same host) or the
+                api-guard proxy. Requires ``asset_id``.
+            on_failure: Gate policy — ``"raise"`` (default) and
+                ``"fail_closed"`` raise the typed exception (identical
+                behavior; the latter name reads better in production
+                configs); ``"fail_open"`` logs at WARN with structured
+                fields and proceeds with the load. Applies only to the
+                verify-status gate; :class:`IntegrityError` always raises.
 
         Raises:
             IntegrityError: If the re-hashed artifacts do not match the
                 ``ario.artifact_hash`` anchored at training time. The underlying
                 pyfunc model is never loaded in this case.
+            ario_mlflow.errors.VerifyStatusError: (subclasses) when the
+                verify-status gate refuses the load and ``on_failure`` is
+                ``"raise"``/``"fail_closed"``. The pyfunc model is never
+                loaded and no MLflow call is made in this case.
+            ValueError: On an invalid ``on_failure`` value, or when only one
+                of ``asset_id`` / ``verify_status_client`` is provided.
         """
+        if on_failure not in ON_FAILURE_MODES:
+            raise ValueError(
+                f"on_failure must be one of {ON_FAILURE_MODES}, got {on_failure!r}"
+            )
+        if (asset_id is None) != (verify_status_client is None):
+            raise ValueError(
+                "asset_id and verify_status_client must be provided together"
+            )
+        self._asset_id = asset_id
+        self._verify_status_client = verify_status_client
+        self._on_failure = on_failure
+
+        # Agent verify-status gate FIRST: one cheap local HTTP read against
+        # agent state. Artifact integrity (downloads + hashing) and pyfunc
+        # load only happen once this passes (or fail_open logs through).
+        if verify_status_client is not None:
+            self._gate_on_verify_status()
+
         self._model_uri = model_uri
         self._proof_engine = proof_engine or ProofEngine()
         self._anchor = anchor or ArweaveAnchor(
@@ -391,6 +464,57 @@ class VerifiedModel:
                 self._prediction_previous_hash = reg_tx
 
         self._lock = threading.Lock()
+
+    def _gate_on_verify_status(self) -> None:
+        """Consult the agent's verify-status endpoint and apply on_failure.
+
+        Outcome→exception mapping is `verify-status-api.md` §9.1 via
+        :func:`ario_mlflow.errors.exception_for_status`. Transport-level
+        client errors (auth, 404, network, the api-guard 503 license gate)
+        fall under the same ``on_failure`` policy — contract §9.1: "treat
+        any non-200 as a transport error and apply the same on_failure
+        policy."
+        """
+        try:
+            status = self._verify_status_client.get(self._asset_id)
+        except VerifyStatusError as e:
+            self._apply_gate_policy(e, e.status)
+            return
+        exc = exception_for_status(status)
+        if exc is not None:
+            self._apply_gate_policy(exc, status)
+            return
+        logger.info(
+            f"Agent verify-status gate passed for asset {self._asset_id!r} "
+            f"(outcome=verified, stale=False)"
+        )
+
+    def _apply_gate_policy(
+        self, exc: VerifyStatusError, status: "VerifyStatus | None"
+    ) -> None:
+        """Raise per on_failure, or log-and-proceed for fail_open.
+
+        A model load that silently bypasses verification is a regulatory
+        liability — the fail_open line is WARN with structured fields
+        (``extra["ario_verify_status"]``) so SIEM pipelines can key on it.
+        """
+        if self._on_failure != "fail_open":
+            raise exc
+        fields = {
+            "asset_id": self._asset_id,
+            "error": type(exc).__name__,
+            "outcome": status.outcome if status else None,
+            "stale": status.stale if status else None,
+            "policy_hash": status.policy_hash if status else None,
+            "current_tx_id": status.current_tx_id if status else None,
+        }
+        logger.warning(
+            "fail_open: proceeding with model load DESPITE a failed "
+            "verification gate — "
+            + " ".join(f"{k}={v}" for k, v in fields.items())
+            + f" detail={exc}",
+            extra={"ario_verify_status": fields},
+        )
 
     def _build_prediction_payload(
         self,
