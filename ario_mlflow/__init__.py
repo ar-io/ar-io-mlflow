@@ -28,6 +28,16 @@ Public API:
   ``proof_found`` so callers can distinguish "envelope retrieved" from
   "envelope was missing."
 - :class:`ArioVerifyClient` — ar.io Verify REST client.
+- :class:`VerifyStatusClient` / :class:`VerifyStatus` — client for the
+  ar-io-agent ``GET /v1/verify-status/<asset_id>`` endpoint (same-host
+  management port or api-guard proxy), used to gate model loads.
+- The verify-status exception family — :class:`AssetVerificationError`
+  (family root, also the base of :class:`IntegrityError`),
+  :class:`VerifyStatusError`, :class:`AssetTamperedError`,
+  :class:`AssetStaleError`, :class:`AssetMissingError`,
+  :class:`AssetUnknownError`, :class:`VerifyStatusAuthError`,
+  :class:`VerifyStatusUnknownAssetError`,
+  :class:`VerifyStatusTransportError`, :class:`VerifyStatusLicenseError`.
 """
 
 __version__ = "0.2.4"
@@ -64,6 +74,23 @@ def __getattr__(name):
     ):
         from ario_mlflow import verify as _verify
         return getattr(_verify, name)
+    if name in ("VerifyStatusClient", "VerifyStatus"):
+        from ario_mlflow import verify_status_client as _vsc
+        return getattr(_vsc, name)
+    if name in (
+        "AssetVerificationError",
+        "VerifyStatusError",
+        "AssetTamperedError",
+        "AssetStaleError",
+        "AssetMissingError",
+        "AssetUnknownError",
+        "VerifyStatusAuthError",
+        "VerifyStatusUnknownAssetError",
+        "VerifyStatusTransportError",
+        "VerifyStatusLicenseError",
+    ):
+        from ario_mlflow import errors as _errors
+        return getattr(_errors, name)
     raise AttributeError(f"module 'ario_mlflow' has no attribute {name!r}")
 
 
@@ -83,4 +110,16 @@ __all__ = [
     "verify_record",
     "verify_proof_by_tx",
     "ArioVerifyClient",
+    "VerifyStatusClient",
+    "VerifyStatus",
+    "AssetVerificationError",
+    "VerifyStatusError",
+    "AssetTamperedError",
+    "AssetStaleError",
+    "AssetMissingError",
+    "AssetUnknownError",
+    "VerifyStatusAuthError",
+    "VerifyStatusUnknownAssetError",
+    "VerifyStatusTransportError",
+    "VerifyStatusLicenseError",
 ]

@@ -6,7 +6,23 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-_No changes yet._
+### Added
+
+- **`VerifyStatusClient`** (`ario_mlflow.verify_status_client`) — consumer client
+  for the ar-io-agent `GET /v1/verify-status/<asset_id>` endpoint (wire contract:
+  `ar-io-agent/docs/verify-status-api.md`, v1.2 Lane A). Supports both deployment
+  forms: the same-host management port (`secret=` → `X-Ario-Management-Secret`)
+  and the api-guard proxy (`api_key=` → `Authorization: Bearer`). Branches on
+  HTTP status codes only, normalizes unrecognized outcomes to `unknown`, ignores
+  unknown response fields (contract §10), and offers opt-in monotonic-clock
+  response caching for hot-path consumers (contract §9.2).
+- **Typed verify-status exception family** (`ario_mlflow.errors`) —
+  `AssetVerificationError` (family root), `VerifyStatusError`,
+  `AssetTamperedError`, `AssetStaleError`, `AssetMissingError`,
+  `AssetUnknownError`, `VerifyStatusAuthError`, `VerifyStatusUnknownAssetError`,
+  `VerifyStatusTransportError`, and `VerifyStatusLicenseError` (api-guard's
+  `503 license required`, carrying `upgrade_url`). The §9.1 outcome→exception
+  mapping lives in `errors.exception_for_status`.
 
 ## [0.2.4] — 2026-05-28
 
