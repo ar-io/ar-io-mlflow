@@ -6,7 +6,42 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-_No changes yet._
+### Added
+
+- **`VerifyStatusClient`** (`ario_mlflow.verify_status_client`) — consumer client
+  for the ar-io-agent `GET /v1/verify-status/<asset_id>` endpoint (wire contract:
+  `ar-io-agent/docs/verify-status-api.md`, v1.2 Lane A). Supports both deployment
+  forms: the same-host management port (`secret=` → `X-Ario-Management-Secret`)
+  and the api-guard proxy (`api_key=` → `Authorization: Bearer`). Branches on
+  HTTP status codes only, normalizes unrecognized outcomes to `unknown`, ignores
+  unknown response fields (contract §10), and offers opt-in monotonic-clock
+  response caching for hot-path consumers (contract §9.2).
+- **Typed verify-status exception family** (`ario_mlflow.errors`) —
+  `AssetVerificationError` (family root), `VerifyStatusError`,
+  `AssetTamperedError`, `AssetStaleError`, `AssetMissingError`,
+  `AssetUnknownError`, `VerifyStatusAuthError`, `VerifyStatusUnknownAssetError`,
+  `VerifyStatusTransportError`, and `VerifyStatusLicenseError` (the
+  `503 license required` gate, carrying `upgrade_url`). The §9.1
+  outcome→exception mapping lives in `errors.exception_for_status`.
+- **`VerifiedModel` agent verify-status gate** — new optional keyword-only
+  arguments `asset_id=`, `verify_status_client=`, `on_failure=` on
+  `VerifiedModel.__init__`. When provided, the agent gate runs **first** (before
+  the artifact integrity check and before any MLflow access — fail fast, one
+  cheap local HTTP call) and refuses to load a model whose covering asset is
+  tampered/missing/stale/unknown per the contract §9.1 mapping. `on_failure`:
+  `"raise"` (default) and `"fail_closed"` raise the typed exception;
+  `"fail_open"` logs at WARN with structured SIEM fields
+  (`extra["ario_verify_status"]`: asset_id, outcome, stale, policy_hash,
+  current_tx_id) and proceeds. Absent the new kwargs, behavior is byte-for-byte
+  unchanged. Gating is load-time only in this release; per-predict re-checking
+  (contract §9.2's 10–30s cache cadence) is a planned follow-up.
+
+### Changed
+
+- `IntegrityError` now subclasses `ario_mlflow.errors.AssetVerificationError`
+  (previously bare `Exception`; backward-compatible) so one
+  `except AssetVerificationError` clause catches both load-time gates —
+  artifact re-hash and agent verify-status.
 
 ## [0.2.4] — 2026-05-28
 
