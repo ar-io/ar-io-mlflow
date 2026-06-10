@@ -470,7 +470,7 @@ class VerifiedModel:
 
         Outcome→exception mapping is `verify-status-api.md` §9.1 via
         :func:`ario_mlflow.errors.exception_for_status`. Transport-level
-        client errors (auth, 404, network, the api-guard 503 license gate)
+        client errors (auth, 404, network, the 503 license gate)
         fall under the same ``on_failure`` policy — contract §9.1: "treat
         any non-200 as a transport error and apply the same on_failure
         policy."

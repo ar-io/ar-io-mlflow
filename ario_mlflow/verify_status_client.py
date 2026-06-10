@@ -154,7 +154,8 @@ class VerifyStatusClient:
         Raises:
             VerifyStatusAuthError: HTTP 401.
             VerifyStatusUnknownAssetError: HTTP 404 (not in policy).
-            VerifyStatusLicenseError: HTTP 503 (api-guard license gate).
+            VerifyStatusLicenseError: HTTP 503 (the license gate refused
+                the request).
             VerifyStatusTransportError: network failure, malformed body,
                 or any other non-200 status.
         """
@@ -201,8 +202,8 @@ class VerifyStatusClient:
             except ValueError:
                 pass
             message = (
-                f"verify-status for asset {asset_id!r} requires a plan that includes "
-                f"block enforcement (HTTP 503 from api-guard)"
+                f"verify-status for asset {asset_id!r} was refused by the license "
+                f"gate: the active plan does not include block enforcement (HTTP 503)"
             )
             if upgrade_url:
                 message += f"; upgrade at {upgrade_url}"

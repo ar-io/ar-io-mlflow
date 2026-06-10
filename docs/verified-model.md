@@ -66,7 +66,7 @@ Transport-level failures follow the same `on_failure` policy:
 |---|---|
 | HTTP 401 (bad secret / API key) | `VerifyStatusAuthError` |
 | HTTP 404 (`asset_id` not in the agent's policy) | `VerifyStatusUnknownAssetError` |
-| HTTP 503 (api-guard: plan lacks block enforcement) | `VerifyStatusLicenseError` — carries `upgrade_url`; a purchasing signal, not a verification failure |
+| HTTP 503 (license gate: plan lacks block enforcement) | `VerifyStatusLicenseError` — carries `upgrade_url`; a purchasing signal, not a verification failure |
 | Network failure / malformed body / other non-200 | `VerifyStatusTransportError` |
 
 `"raise"` and `"fail_closed"` are identical in behavior — the latter name reads
@@ -113,9 +113,10 @@ inside:
 VerifyStatusClient("https://api-guard.example.com", api_key="ario_...")
 ```
 
-The proxy is license-gated: plans without block enforcement receive
-`503 license required` → `VerifyStatusLicenseError` (with `upgrade_url`); the
-agent is never called in that case.
+**License gating (both topologies).** Plans without block enforcement receive
+`503 license required` → `VerifyStatusLicenseError` (with `upgrade_url`).
+Which hop enforces the license gate is a deployment detail — the client
+branches on the status code alone, so the handling is identical either way.
 
 ## Freshness semantics (`max_age` vs `stale`)
 

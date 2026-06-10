@@ -22,7 +22,7 @@ Hierarchy::
         ├── VerifyStatusAuthError       HTTP 401
         ├── VerifyStatusUnknownAssetError  HTTP 404 (asset_id not in policy)
         └── VerifyStatusTransportError  network failure / other non-200
-            └── VerifyStatusLicenseError  HTTP 503 license required (api-guard)
+            └── VerifyStatusLicenseError  HTTP 503 license required
 
 The outcome→exception mapping implements `verify-status-api.md` §9.1
 verbatim (see :func:`exception_for_status`). Exceptions never embed
@@ -111,12 +111,12 @@ class VerifyStatusTransportError(VerifyStatusError):
 
 
 class VerifyStatusLicenseError(VerifyStatusTransportError):
-    """api-guard refused the request because the tenant's plan does not
+    """The license gate refused the request: the active plan does not
     include block enforcement (HTTP 503, contract §7).
 
     This is a purchasing signal, not a verification failure — the asset
-    was never checked. ``upgrade_url`` carries api-guard's plan upgrade
-    link when the response body included one.
+    was never checked. ``upgrade_url`` carries the plan upgrade link when
+    the response body included one.
     """
 
     def __init__(

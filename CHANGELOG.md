@@ -20,9 +20,9 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `AssetVerificationError` (family root), `VerifyStatusError`,
   `AssetTamperedError`, `AssetStaleError`, `AssetMissingError`,
   `AssetUnknownError`, `VerifyStatusAuthError`, `VerifyStatusUnknownAssetError`,
-  `VerifyStatusTransportError`, and `VerifyStatusLicenseError` (api-guard's
-  `503 license required`, carrying `upgrade_url`). The §9.1 outcome→exception
-  mapping lives in `errors.exception_for_status`.
+  `VerifyStatusTransportError`, and `VerifyStatusLicenseError` (the
+  `503 license required` gate, carrying `upgrade_url`). The §9.1
+  outcome→exception mapping lives in `errors.exception_for_status`.
 - **`VerifiedModel` agent verify-status gate** — new optional keyword-only
   arguments `asset_id=`, `verify_status_client=`, `on_failure=` on
   `VerifiedModel.__init__`. When provided, the agent gate runs **first** (before
