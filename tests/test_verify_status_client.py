@@ -43,6 +43,7 @@ class _StubAgent:
         self.status_code = 200
         self.body: object = GOOD_BODY
         self.raw_body: bytes | None = None  # overrides body when set
+        self.redirect_to: str | None = None  # when set, emit a 302 Location
         self.requests: list[dict] = []  # {"path": ..., "headers": ...} per hit
 
         stub = self
@@ -52,6 +53,12 @@ class _StubAgent:
                 stub.requests.append(
                     {"path": self.path, "headers": dict(self.headers)}
                 )
+                if stub.redirect_to is not None:
+                    self.send_response(302)
+                    self.send_header("Location", stub.redirect_to + self.path)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 payload = (
                     stub.raw_body
                     if stub.raw_body is not None
@@ -195,6 +202,28 @@ def test_503_without_body_url_still_license_error(stub_agent, client):
     with pytest.raises(VerifyStatusLicenseError) as exc_info:
         client.get("customer-pii-models")
     assert exc_info.value.upgrade_url is None
+
+
+def test_redirect_is_not_followed_and_secret_never_leaks(stub_agent, client):
+    """Security regression: requests preserves custom headers (our
+    X-Ario-Management-Secret) across cross-host redirects. A verify-status
+    lookup never legitimately redirects, so a 3xx must become a transport
+    error WITHOUT a second request to the redirect target — the secret must
+    never reach an attacker-chosen host."""
+    sink = _StubAgent()  # the "evil" redirect target on a different port
+    try:
+        # Redirect to localhost:<sink> — a different host than 127.0.0.1,
+        # which is exactly the case where requests would NOT strip the
+        # header and the leak would occur if redirects were followed.
+        stub_agent.redirect_to = f"http://localhost:{sink.server.server_address[1]}"
+        with pytest.raises(VerifyStatusTransportError):
+            client.get("customer-pii-models")
+        assert sink.requests == [], "secret-bearing request reached the redirect target"
+        assert "X-Ario-Management-Secret" not in {
+            h for r in sink.requests for h in r["headers"]
+        }
+    finally:
+        sink.close()
 
 
 def test_500_raises_transport_error(stub_agent, client):
