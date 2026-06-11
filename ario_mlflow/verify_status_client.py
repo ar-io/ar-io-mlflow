@@ -166,7 +166,20 @@ class VerifyStatusClient:
 
         url = f"{self._base_url}/v1/verify-status/{quote(asset_id, safe='')}"
         try:
-            resp = self._session.get(url, headers=self._headers, timeout=self._timeout)
+            # allow_redirects=False is a CREDENTIAL-SAFETY measure, not a
+            # nicety: requests preserves custom headers (our
+            # X-Ario-Management-Secret) across cross-host redirects — only
+            # Authorization is auto-stripped — so a 3xx from a compromised
+            # or misconfigured upstream would otherwise hand the management
+            # secret to an attacker-chosen host. A verify-status lookup is a
+            # fixed JSON endpoint that never legitimately redirects, so any
+            # 3xx is treated as a transport error below.
+            resp = self._session.get(
+                url,
+                headers=self._headers,
+                timeout=self._timeout,
+                allow_redirects=False,
+            )
         except requests.RequestException as e:
             raise VerifyStatusTransportError(
                 f"verify-status request failed for asset {asset_id!r}: {e}",
