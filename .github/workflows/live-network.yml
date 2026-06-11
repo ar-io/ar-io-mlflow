@@ -27,6 +27,14 @@ jobs:
   live:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Secrets are hoisted to job-level env because the `secrets` context is
+    # not available in step-level `if:` expressions — referencing it there
+    # makes the whole file unparseable, which surfaced as a failed
+    # "workflow file issue" run on EVERY push (despite the
+    # workflow_dispatch-only trigger). Steps gate on `env.*` instead.
+    env:
+      WALLET_JSON: ${{ secrets.ARIO_MLFLOW_LIVE_WALLET_JSON }}
+      ARIO_VERIFY_URL: ${{ secrets.ARIO_MLFLOW_LIVE_ARIO_VERIFY_URL }}
     steps:
       - uses: actions/checkout@v4
 
@@ -42,9 +50,7 @@ jobs:
           pip install -e ".[test]" scikit-learn
 
       - name: Stage wallet from secret (if provided)
-        if: ${{ secrets.ARIO_MLFLOW_LIVE_WALLET_JSON != '' }}
-        env:
-          WALLET_JSON: ${{ secrets.ARIO_MLFLOW_LIVE_WALLET_JSON }}
+        if: ${{ env.WALLET_JSON != '' }}
         run: |
           umask 077
           mkdir -p "$HOME/.ario-mlflow"
@@ -52,8 +58,8 @@ jobs:
           echo "ARIO_MLFLOW_ARWEAVE_WALLET=$HOME/.ario-mlflow/ci-wallet.json" >> "$GITHUB_ENV"
 
       - name: Forward ar.io Verify URL (if provided)
-        if: ${{ secrets.ARIO_MLFLOW_LIVE_ARIO_VERIFY_URL != '' }}
-        run: echo "ARIO_MLFLOW_ARIO_VERIFY_URL=${{ secrets.ARIO_MLFLOW_LIVE_ARIO_VERIFY_URL }}" >> "$GITHUB_ENV"
+        if: ${{ env.ARIO_VERIFY_URL != '' }}
+        run: echo "ARIO_MLFLOW_ARIO_VERIFY_URL=$ARIO_VERIFY_URL" >> "$GITHUB_ENV"
 
       - name: Report environment
         run: |
