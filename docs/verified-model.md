@@ -104,19 +104,22 @@ override in k8s):
 VerifyStatusClient("http://127.0.0.1:9847", secret=...)
 ```
 
-**Cross-host (api-guard proxy).** Never expose the agent's port. api-guard's
-`/v1/verify-status/<asset_id>` proxy terminates your customer API key on the
-outside and re-issues the request to the per-agent management port on the
-inside:
+**Cross-host: not supported in v1.2.** The agent's verify-status endpoint is
+loopback-only by design, and **no api-guard proxy route exists** — an earlier
+draft of the contract proposed one, but it was withdrawn before
+implementation (it would have required api-guard→agent connectivity that
+contradicts the loopback-bind invariant; see `verify-status-api.md` v1.1
+§9.2 in `ar-io-agent`). Run the consumer on the agent's host. The client's
+`api_key=` constructor mode is a forward-compatibility reservation for a
+possible future hosted topology; it currently has no server-side
+counterpart.
 
-```python
-VerifyStatusClient("https://api-guard.example.com", api_key="ario_...")
-```
-
-**License gating (both topologies).** Plans without block enforcement receive
+**License gating.** Plans without block enforcement receive
 `503 license required` → `VerifyStatusLicenseError` (with `upgrade_url`).
-Which hop enforces the license gate is a deployment detail — the client
-branches on the status code alone, so the handling is identical either way.
+The **agent itself** emits the 503, driven by entitlement state api-guard
+delivers on register/heartbeat responses — fail-open when that state is
+absent, so an unlicensed or offline api-guard never bricks verify-status.
+The client branches on the status code alone.
 
 ## Freshness semantics (`max_age` vs `stale`)
 
