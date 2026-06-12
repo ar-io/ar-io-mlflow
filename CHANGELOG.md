@@ -35,10 +35,20 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tampered/missing/stale/unknown per the contract §9.1 mapping. `on_failure`:
   `"raise"` (default) and `"fail_closed"` raise the typed exception;
   `"fail_open"` logs at WARN with structured SIEM fields
-  (`extra["ario_verify_status"]`: asset_id, outcome, stale, policy_hash,
+  (`extra["ario_verify_status"]`: asset_id, phase, outcome, stale, policy_hash,
   current_tx_id) and proceeds. Absent the new kwargs, behavior is byte-for-byte
-  unchanged. Gating is load-time only in this release; per-predict re-checking
-  (contract §9.2's 10–30s cache cadence) is a planned follow-up.
+  unchanged.
+- **`VerifiedModel` per-predict re-checking** — two new opt-in
+  keyword-only arguments on `VerifiedModel.__init__`:
+  `recheck_per_predict: bool = False` re-runs the verify-status gate at the
+  top of every `predict()` call (a tamper detected by the agent after load
+  then refuses subsequent inference too); `recheck_max_cache_age: float | None
+  = None` forwards into `VerifyStatusClient.get(max_cache_age=...)` for the
+  contract §9.2 hot-path cache (10–30s is the contract's guidance), with
+  `None` always fetching fresh. The same `on_failure` policy applies — the
+  structured WARN log carries `phase="predict"` so SIEM can distinguish
+  per-predict bypasses from load-time ones. Default-off; absent the new
+  kwargs, predict() makes zero verify-status calls.
 
 ### Changed
 

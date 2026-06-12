@@ -288,6 +288,8 @@ class VerifiedModel:
         asset_id: str | None = None,
         verify_status_client: "VerifyStatusClient | None" = None,
         on_failure: str = "raise",
+        recheck_per_predict: bool = False,
+        recheck_max_cache_age: float | None = None,
     ):
         """Load an MLflow model and verify its artifacts against the anchored hash.
 
@@ -310,10 +312,20 @@ class VerifiedModel:
         :class:`~ario_mlflow.errors.AssetStaleError`, ``unknown`` →
         :class:`~ario_mlflow.errors.AssetUnknownError`. Transport-level
         failures (:class:`~ario_mlflow.errors.VerifyStatusTransportError`
-        etc.) fall under the same policy. The gate runs at **load time
-        only** — a tamper detected by the agent *after* this constructor
-        returns is not re-checked on ``predict()`` (per-predict re-checking
-        with the contract's 10–30s cache guidance is a planned follow-up).
+        etc.) fall under the same policy.
+
+        By default the gate runs at **load time only**. Pass
+        ``recheck_per_predict=True`` to additionally re-run the same gate at
+        the top of every :meth:`predict` call — a tamper the agent detects
+        *after* the constructor returns then refuses subsequent inference
+        too. Pair with ``recheck_max_cache_age=`` for the §9.2 hot-path
+        caching pattern (the contract's guidance is 10–30s); leave the
+        cache age at ``None`` to consult the agent fresh on every
+        prediction. ``on_failure`` semantics carry through unchanged: the
+        per-predict gate raises the same typed exceptions on
+        ``"raise"`` / ``"fail_closed"`` and logs the same structured WARN
+        on ``"fail_open"`` (with ``phase="predict"`` so SIEM pipelines can
+        distinguish per-predict failures from load-time ones).
 
         Args:
             model_uri: A ``models:/`` URI in any of these forms:
@@ -339,8 +351,21 @@ class VerifiedModel:
                 ``"fail_closed"`` raise the typed exception (identical
                 behavior; the latter name reads better in production
                 configs); ``"fail_open"`` logs at WARN with structured
-                fields and proceeds with the load. Applies only to the
-                verify-status gate; :class:`IntegrityError` always raises.
+                fields and proceeds. Applies to both the load-time gate
+                and (when enabled) the per-predict gate;
+                :class:`IntegrityError` always raises.
+            recheck_per_predict: When ``True``, re-run the verify-status
+                gate at the top of every :meth:`predict` call. Default
+                ``False`` (load-time gate only — historical behavior).
+                Requires ``verify_status_client``.
+            recheck_max_cache_age: Seconds within which a cached
+                verify-status response may serve the per-predict gate
+                without an HTTP call (passed straight to
+                :meth:`VerifyStatusClient.get`). ``None`` (default) always
+                fetches fresh — the contract's "outcome / stale are not
+                cacheable for gating decisions" stance (§9.1). Hot paths
+                that prefer the contract's 10–30s pattern pass that here.
+                Ignored unless ``recheck_per_predict=True``.
 
         Raises:
             IntegrityError: If the re-hashed artifacts do not match the
@@ -350,8 +375,10 @@ class VerifiedModel:
                 verify-status gate refuses the load and ``on_failure`` is
                 ``"raise"``/``"fail_closed"``. The pyfunc model is never
                 loaded and no MLflow call is made in this case.
-            ValueError: On an invalid ``on_failure`` value, or when only one
-                of ``asset_id`` / ``verify_status_client`` is provided.
+            ValueError: On an invalid ``on_failure`` value, when only one
+                of ``asset_id`` / ``verify_status_client`` is provided, or
+                when ``recheck_per_predict=True`` without a
+                ``verify_status_client``.
         """
         if on_failure not in ON_FAILURE_MODES:
             raise ValueError(
@@ -361,15 +388,21 @@ class VerifiedModel:
             raise ValueError(
                 "asset_id and verify_status_client must be provided together"
             )
+        if recheck_per_predict and verify_status_client is None:
+            raise ValueError(
+                "recheck_per_predict=True requires verify_status_client + asset_id"
+            )
         self._asset_id = asset_id
         self._verify_status_client = verify_status_client
         self._on_failure = on_failure
+        self._recheck_per_predict = recheck_per_predict
+        self._recheck_max_cache_age = recheck_max_cache_age
 
         # Agent verify-status gate FIRST: one cheap local HTTP read against
         # agent state. Artifact integrity (downloads + hashing) and pyfunc
         # load only happen once this passes (or fail_open logs through).
         if verify_status_client is not None:
-            self._gate_on_verify_status()
+            self._gate_on_verify_status(phase="load")
 
         self._model_uri = model_uri
         self._proof_engine = proof_engine or ProofEngine()
@@ -466,7 +499,12 @@ class VerifiedModel:
 
         self._lock = threading.Lock()
 
-    def _gate_on_verify_status(self) -> None:
+    def _gate_on_verify_status(
+        self,
+        *,
+        phase: str = "load",
+        max_cache_age: float | None = None,
+    ) -> None:
         """Consult the agent's verify-status endpoint and apply on_failure.
 
         Outcome→exception mapping is `verify-status-api.md` §9.1 via
@@ -475,42 +513,60 @@ class VerifiedModel:
         fall under the same ``on_failure`` policy — contract §9.1: "treat
         any non-200 as a transport error and apply the same on_failure
         policy."
+
+        Args:
+            phase: ``"load"`` for the constructor-time check; ``"predict"``
+                for the optional per-predict re-check. Surfaced in log
+                lines and the structured ``extra["ario_verify_status"]``
+                fields so SIEM pipelines can distinguish them.
+            max_cache_age: Forwarded to :meth:`VerifyStatusClient.get` —
+                ``None`` always fetches fresh; a positive value enables
+                the contract §9.2 hot-path cache.
         """
         try:
-            status = self._verify_status_client.get(self._asset_id)
+            status = self._verify_status_client.get(
+                self._asset_id, max_cache_age=max_cache_age
+            )
         except VerifyStatusError as e:
-            self._apply_gate_policy(e, e.status)
+            self._apply_gate_policy(e, e.status, phase=phase)
             return
         exc = exception_for_status(status)
         if exc is not None:
-            self._apply_gate_policy(exc, status)
+            self._apply_gate_policy(exc, status, phase=phase)
             return
         logger.info(
             f"Agent verify-status gate passed for asset {self._asset_id!r} "
-            f"(outcome=verified, stale=False)"
+            f"(phase={phase}, outcome=verified, stale=False)"
         )
 
     def _apply_gate_policy(
-        self, exc: VerifyStatusError, status: "VerifyStatus | None"
+        self,
+        exc: VerifyStatusError,
+        status: "VerifyStatus | None",
+        *,
+        phase: str = "load",
     ) -> None:
         """Raise per on_failure, or log-and-proceed for fail_open.
 
-        A model load that silently bypasses verification is a regulatory
-        liability — the fail_open line is WARN with structured fields
-        (``extra["ario_verify_status"]``) so SIEM pipelines can key on it.
+        A model load (or live prediction) that silently bypasses
+        verification is a regulatory liability — the fail_open line is
+        WARN with structured fields (``extra["ario_verify_status"]``,
+        including ``phase``) so SIEM pipelines can key on it.
         """
         if self._on_failure != "fail_open":
             raise exc
         fields = {
             "asset_id": self._asset_id,
+            "phase": phase,
             "error": type(exc).__name__,
             "outcome": status.outcome if status else None,
             "stale": status.stale if status else None,
             "policy_hash": status.policy_hash if status else None,
             "current_tx_id": status.current_tx_id if status else None,
         }
+        action = "model load" if phase == "load" else "prediction"
         logger.warning(
-            "fail_open: proceeding with model load DESPITE a failed "
+            f"fail_open: proceeding with {action} DESPITE a failed "
             "verification gate — "
             + " ".join(f"{k}={v}" for k, v in fields.items())
             + f" detail={exc}",
@@ -601,6 +657,16 @@ class VerifiedModel:
               bytes) is uploaded to Arweave in a daemon thread. Errors
               surface on the returned object, not raised.
         """
+        # Per-predict verify-status gate (opt-in via recheck_per_predict).
+        # Runs FIRST so a tamper detected by the agent post-load short-circuits
+        # before any inference work. Same on_failure semantics as the load
+        # gate; the structured fail_open log carries phase="predict" for SIEM.
+        if self._recheck_per_predict:
+            self._gate_on_verify_status(
+                phase="predict",
+                max_cache_age=self._recheck_max_cache_age,
+            )
+
         decision_id = str(uuid.uuid4())
         start = time()
 
