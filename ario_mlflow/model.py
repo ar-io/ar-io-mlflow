@@ -332,8 +332,9 @@ class VerifiedModel:
                 artifacts. Requires ``verify_status_client``.
             verify_status_client: A
                 :class:`~ario_mlflow.verify_status_client.VerifyStatusClient`
-                pointed at the agent's management port (same host) or the
-                api-guard proxy. Requires ``asset_id``.
+                pointed at the agent's management port (loopback-only by
+                design — see the client's module docstring on why no
+                api-guard proxy form is supported). Requires ``asset_id``.
             on_failure: Gate policy — ``"raise"`` (default) and
                 ``"fail_closed"`` raise the typed exception (identical
                 behavior; the latter name reads better in production

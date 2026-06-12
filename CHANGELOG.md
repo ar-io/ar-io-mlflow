@@ -10,12 +10,16 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`VerifyStatusClient`** (`ario_mlflow.verify_status_client`) — consumer client
   for the ar-io-agent `GET /v1/verify-status/<asset_id>` endpoint (wire contract:
-  `ar-io-agent/docs/verify-status-api.md`, v1.2 Lane A). Supports both deployment
-  forms: the same-host management port (`secret=` → `X-Ario-Management-Secret`)
-  and the api-guard proxy (`api_key=` → `Authorization: Bearer`). Branches on
-  HTTP status codes only, normalizes unrecognized outcomes to `unknown`, ignores
-  unknown response fields (contract §10), and offers opt-in monotonic-clock
-  response caching for hot-path consumers (contract §9.2).
+  `ar-io-agent/docs/verify-status-api.md`, v1.2 Lane A). The endpoint is
+  loopback-only by design (`127.0.0.1:9847`); pass `secret=` →
+  `X-Ario-Management-Secret`. The `api_key=` constructor branch is a
+  **forward-compatibility reservation** with no server-side counterpart today —
+  the cross-host proxy route proposed early in v1.2 was withdrawn before
+  implementation (it would have required api-guard→agent connectivity
+  contradicting the loopback-bind invariant). Branches on HTTP status codes
+  only, normalizes unrecognized outcomes to `unknown`, ignores unknown response
+  fields (contract §10), and offers opt-in monotonic-clock response caching for
+  hot-path consumers (contract §9.2).
 - **Typed verify-status exception family** (`ario_mlflow.errors`) —
   `AssetVerificationError` (family root), `VerifyStatusError`,
   `AssetTamperedError`, `AssetStaleError`, `AssetMissingError`,
@@ -38,6 +42,27 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Verification primitives migrated to the shared `ar-io-proof` kernel**
+  (PyPI `ar-io-proof>=0.1.1`, conformance-gated against `test-vectors-v1.0`).
+  `ario_mlflow.proof` is now a thin adapter: `ProofEngine.create_commitment`
+  delegates to `ario_proof.sign_envelope`, `verify_commitment` to
+  `ario_proof.verify_envelope`. Mlflow's historical dict shape
+  (`signature_valid`, `payload_hash_valid`, `spec_version_status`, …) is
+  preserved for back-compat; key persistence (file format, env loading,
+  auto-generate) stays plugin-owned. Three classes of latent lenience the
+  in-tree code carried are now correctly enforced by the kernel: (1) the
+  `_*` annotation-key strip is profile-conditional — `ario.agent/v1`
+  envelopes with injected `_*` keys now FAIL signature verification
+  (mlflow envelopes still strip, preserving the historical convention);
+  (2) inline `payload` is now re-hashed against `payload_hash` when
+  present (mlflow profiles bind externally and don't carry inline payload,
+  so this affects only ingested foreign envelopes); (3) `verify_proof_by_tx`
+  no longer mutates the fetched envelope to attach `_tx_id` — the TX ID
+  is now routed out-of-band via a new `tx_id=` keyword on
+  `verify_ario_attestation` / `verify_record` / `full_verify`. Legacy
+  envelopes (no `spec_version`) continue to verify (`allow_legacy=True`).
+  Top-level `jcs` dep dropped (the kernel carries it transitively); no
+  in-tree code imports `jcs` directly.
 - `IntegrityError` now subclasses `ario_mlflow.errors.AssetVerificationError`
   (previously bare `Exception`; backward-compatible) so one
   `except AssetVerificationError` clause catches both load-time gates —

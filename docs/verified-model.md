@@ -36,8 +36,9 @@ behaves exactly as before (artifact integrity check only).
 
 ## Gate ordering
 
-1. **Agent verify-status** — one local HTTP read of agent state. Never triggers
-   a re-verify, never makes a network call beyond the agent/proxy.
+1. **Agent verify-status** — one local HTTP read of agent state on the
+   loopback management port. Never triggers a re-verify, never makes a
+   network call beyond the agent.
 2. **Artifact integrity** — re-hash artifacts vs `ario.artifact_hash`
    (downloads artifacts; this is why the cheap agent check runs first).
 3. **pyfunc load** — user code executes only after both gates pass.

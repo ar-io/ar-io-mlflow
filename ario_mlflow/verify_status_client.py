@@ -1,14 +1,26 @@
 """HTTP client for the agent's ``GET /v1/verify-status/<asset_id>`` endpoint.
 
 Implements the consumer side of `ar-io-agent/docs/verify-status-api.md`
-(v1, contract draft 2026-06-10). Two deployment forms, same client:
+(v1, contract draft 2026-06-10). The endpoint is loopback-only by design —
+the agent binds ``127.0.0.1:9847`` and there is **no api-guard proxy
+route**: a cross-host proxy was proposed early in v1.2 design and
+withdrawn before implementation (it would have required api-guard→agent
+connectivity that contradicts the loopback-bind invariant; see
+``verify-status-api.md`` v1.1 §9.2).
+
+The client therefore has **one supported deployment form** today:
 
 - **Same-host management port** (``http://127.0.0.1:9847``) — pass
   ``secret=`` (the agent's ``<state-dir>/management-secret`` value);
   sent as ``X-Ario-Management-Secret``.
-- **api-guard proxy** (``https://api-guard.example.com``) — pass
-  ``api_key=`` (the customer API key); sent as
-  ``Authorization: Bearer <key>``.
+
+The ``api_key=`` constructor mode is a **documented forward-compatibility
+reservation**: it currently has no server-side counterpart and the agent
+itself never honors a ``Authorization: Bearer`` header. The constructor
+still accepts it (matching contract §2.1's "exactly one of" shape) so a
+future hosted topology — if one ever lands — can ship without breaking
+the consumer signature. Code paths that construct with ``api_key=`` will
+get a transport error from any agent today.
 
 Contract discipline baked in:
 
@@ -101,16 +113,19 @@ class VerifyStatusClient:
 
     Args:
         base_url: ``http://127.0.0.1:9847`` for the same-host management
-            port, or the api-guard base URL for the proxy form.
-        secret: The agent's management secret (same-host form). Sent as
+            port (the only deployment form with a server-side counterpart
+            today; see the module docstring).
+        secret: The agent's management secret. Sent as
             ``X-Ario-Management-Secret``.
-        api_key: The customer API key (api-guard proxy form). Sent as
-            ``Authorization: Bearer <key>``.
+        api_key: Forward-compatibility reservation — passed as
+            ``Authorization: Bearer <key>``, but no agent endpoint honors
+            it today; calls will fail at transport. Reserved so a future
+            hosted topology can ship without breaking this signature.
         timeout: Per-request timeout in seconds.
         session: Optional ``requests.Session`` override (testing / pooling).
 
-    Exactly one of ``secret`` / ``api_key`` must be provided — neither
-    endpoint form has an anonymous mode (contract §2.1).
+    Exactly one of ``secret`` / ``api_key`` must be provided — the
+    contract has no anonymous mode (contract §2.1).
     """
 
     def __init__(
@@ -125,7 +140,8 @@ class VerifyStatusClient:
         if (secret is None) == (api_key is None):
             raise ValueError(
                 "exactly one of secret= (management port) or api_key= "
-                "(api-guard proxy) is required"
+                "(forward-compat reservation — no server-side counterpart today) "
+                "is required"
             )
         self._base_url = base_url.rstrip("/")
         if secret is not None:

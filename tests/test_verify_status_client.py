@@ -1,7 +1,8 @@
 """Tests for VerifyStatusClient against an in-process HTTP stub.
 
 No network, no live agent — a loopback ``ThreadingHTTPServer`` plays the
-agent (or api-guard proxy) per `verify-status-api.md`. Follows the repo
+agent's management port per `verify-status-api.md` (the endpoint is
+loopback-only; the contract has no proxy form). Follows the repo
 convention of zero extra test dependencies.
 """
 
