@@ -240,11 +240,11 @@ def _verify_envelope_for_tx(
         if bytes_check.get("payload_bytes")
         else {"ok": None, "reason": bytes_check.get("reason", "no_payload_to_compare")}
     )
-    # For ar.io Verify, inject the TX ID the caller already knows. The
-    # envelope itself doesn't carry it (the TX IS its address).
-    envelope_with_tx = dict(envelope)
-    envelope_with_tx["_tx_id"] = tx_id
-    ario_result = verify_ario_attestation(envelope_with_tx, ario_client)
+    # For ar.io Verify, route the TX ID the caller already knows out-of-band
+    # via the keyword form (envelope-mutation works for mlflow envelopes but
+    # not the cross-product ario.agent/v1 shape — the keyword form is
+    # profile-agnostic).
+    ario_result = verify_ario_attestation(envelope, ario_client, tx_id=tx_id)
 
     if not quiet:
         _print_four_checks(sig, bytes_check, sot, ario_result, record_label=record_label)
