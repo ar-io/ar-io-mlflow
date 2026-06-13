@@ -101,7 +101,7 @@ class VerifyStatusUnknownAssetError(VerifyStatusError):
 
 
 class VerifyStatusTransportError(VerifyStatusError):
-    """The agent (or proxy) could not be asked, or answered unusably.
+    """The agent could not be asked, or answered unusably.
 
     Covers network failures, malformed response bodies, and any HTTP
     status outside the contract's enumerated set. Per contract §9.1,

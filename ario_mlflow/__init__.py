@@ -30,7 +30,9 @@ Public API:
 - :class:`ArioVerifyClient` — ar.io Verify REST client.
 - :class:`VerifyStatusClient` / :class:`VerifyStatus` — client for the
   ar-io-agent ``GET /v1/verify-status/<asset_id>`` endpoint (same-host
-  management port or api-guard proxy), used to gate model loads.
+  management port — the endpoint is loopback-only by design; the
+  ``api_key=`` constructor mode is a forward-compat reservation with no
+  server-side counterpart today), used to gate model loads.
 - The verify-status exception family — :class:`AssetVerificationError`
   (family root, also the base of :class:`IntegrityError`),
   :class:`VerifyStatusError`, :class:`AssetTamperedError`,

@@ -1,88 +1,93 @@
-"""Ed25519 signing, canonical JSON, and SHA-256 hashing for proof records."""
+"""Mlflow-side proof helpers wrapping the ar-io-proof verification kernel.
+
+Every byte-level primitive — JCS canonicalization, SHA-256, Ed25519 sign/verify,
+the profile-conditional ``_*`` strip — lives in the shared ``ario_proof``
+kernel (PyPI ``ar-io-proof``, conformance-gated against ``test-vectors-v1.0``).
+This module is mlflow's adapter: it owns key persistence (file format, env-var
+loading, auto-generate) and preserves the ``ProofEngine.create_commitment`` /
+``ProofEngine.verify_commitment`` dict shape that the rest of the plugin
+(``client.py``, ``model.py``, ``anchoring.py``, ``verify.py``) and its test
+surface depend on.
+
+Lenience that does NOT survive the migration (all real bugs the kernel
+catches and mlflow used to mask):
+
+- The legacy in-tree code stripped underscore-prefixed (``_*``) annotation
+  keys from the signed scope *regardless of profile*. The kernel correctly
+  strips them only for the mlflow profile and pre-``spec_version`` legacy
+  envelopes — an ``ario.agent/v1`` envelope with an injected ``_*`` key now
+  fails signature verification, the same way any other unsigned-field
+  injection does. No production caller depended on the old lenience for
+  agent envelopes (the cross-product test mints clean envelopes).
+- The legacy code did not re-check inline ``payload`` against ``payload_hash``.
+  The kernel does (for envelopes that carry inline ``payload``), which is a
+  pure tightening — mlflow profiles bind externally and never carry inline
+  payload, so this affects only ingested envelopes from other profiles.
+
+Lenience that IS preserved (legitimate backward-compatibility):
+
+- ``verify_commitment`` passes ``allow_legacy=True`` so envelopes anchored
+  before the ``spec_version`` field existed still verify and surface as
+  ``spec_version_status="legacy"``. The historical surface stays intact.
+"""
 
 import base64
-import hashlib
 import json
 import os
 import uuid
 from datetime import datetime, timezone
 
-import jcs
 from nacl.signing import SigningKey, VerifyKey
 
+from ario_proof import (
+    ACCEPTED_SPEC_VERSIONS as _KERNEL_ACCEPTED_SPEC_VERSIONS,
+)
+from ario_proof import (
+    canonical_json,
+    normalize_floats,
+    sha256_hex,
+)
+from ario_proof import sign_envelope as _kernel_sign_envelope
+from ario_proof import verify_envelope as _kernel_verify_envelope
 
-# Envelope spec version this build emits. Bumped when the signed-body
-# shape changes in a way that requires verifiers to know the new shape.
+__all__ = [
+    "SPEC_VERSION",
+    "ACCEPTED_SPEC_VERSIONS",
+    "ProofEngine",
+    "canonical_json",
+    "normalize_floats",
+    "hash_data",
+    "generate_keypair",
+    "load_signing_key",
+    "load_signing_key_from_env",
+    "load_verify_key",
+]
+
+
+# Envelope spec version this build emits.
 SPEC_VERSION = "ario.mlflow/v1"
 
-# Spec versions this build *accepts* during verification. Includes the
-# sister agent's major (``ario.agent/v1``) so plugin verifiers can check
-# envelopes minted by ar-io-agent — the two share envelope spec + crypto.
-# A future spec bump adds the new major here; old verifiers that don't
-# know it return ``unsupported_spec_version`` and refuse to verify.
-ACCEPTED_SPEC_VERSIONS = frozenset({
-    "ario.mlflow/v1",
-    "ario.agent/v1",
-})
-
-
-def _classify_spec_version(envelope: dict) -> tuple[str, str | None]:
-    """Classify an envelope's ``spec_version`` field.
-
-    Returns ``(status, reason)`` where ``status`` is one of:
-
-    - ``"supported"`` — present and in :data:`ACCEPTED_SPEC_VERSIONS`.
-    - ``"legacy"`` — field absent. Envelopes anchored before this build
-      had no ``spec_version`` field. They MUST still verify; callers
-      surface ``legacy_envelope=True`` so consumers can distinguish.
-    - ``"unsupported"`` — present but not in the accepted set. The
-      envelope advertises a spec this build doesn't know how to verify.
-
-    ``reason`` is set to ``"unsupported_spec_version"`` only for the
-    unsupported case; otherwise ``None``.
-    """
-    version = envelope.get("spec_version")
-    if version is None:
-        return ("legacy", None)
-    if version in ACCEPTED_SPEC_VERSIONS:
-        return ("supported", None)
-    return ("unsupported", "unsupported_spec_version")
-
-
-def normalize_floats(obj, precision=6):
-    """Recursively round floats. Use BEFORE canonical_json when hashing values
-    that may differ at floating-point precision across measurements (e.g.
-    metrics re-derived from MLflow). Not applied automatically — strict JCS
-    serializes the actual float value, so rounding is the caller's choice.
-    """
-    if isinstance(obj, float):
-        return round(obj, precision)
-    if isinstance(obj, dict):
-        return {k: normalize_floats(v, precision) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [normalize_floats(v, precision) for v in obj]
-    return obj
-
-
-def canonical_json(obj) -> bytes:
-    """RFC-8785 (JSON Canonicalization Scheme) serialization.
-
-    Strict JCS — produces deterministic UTF-8 bytes that any RFC-8785
-    verifier in any language can reproduce without depending on this
-    function. Matches AgentSystems Notary, Sigstore, and the broader
-    RFC-8785 ecosystem. See https://www.rfc-editor.org/rfc/rfc8785.
-
-    Numbers are serialized per ECMA-262 Number.prototype.toString (no
-    trailing zeros, scientific notation for very large / small values).
-    Floats are NOT pre-rounded — callers that need precision-controlled
-    hashing should call ``normalize_floats`` first.
-    """
-    return jcs.canonicalize(obj)
+# Spec versions this build accepts during verification. Re-exported from the
+# kernel so the mlflow-side ``ACCEPTED_SPEC_VERSIONS`` import that callers
+# rely on stays valid; the kernel is the single source of truth for the
+# accepted-major registry.
+ACCEPTED_SPEC_VERSIONS = _KERNEL_ACCEPTED_SPEC_VERSIONS
 
 
 def hash_data(data: bytes) -> str:
-    """SHA-256 hex digest."""
-    return hashlib.sha256(data).hexdigest()
+    """SHA-256 hex digest. Delegates to the kernel's ``sha256_hex``."""
+    return sha256_hex(data)
+
+
+# ---------------------------------------------------------------------------
+# Key lifecycle — file format, env loading, auto-generate
+#
+# The kernel deliberately stays out of key lifecycle (producers own key
+# storage and rotation; ``ario_proof.sign`` takes a ``SigningKey`` and signs
+# bytes). These helpers keep mlflow's existing on-disk key format
+# (``{"seed": base64}`` for private, ``{"key": base64}`` for public) and
+# auto-generation behavior unchanged.
+# ---------------------------------------------------------------------------
 
 
 def generate_keypair(private_path: str, public_path: str) -> tuple[SigningKey, VerifyKey]:
@@ -118,10 +123,17 @@ def load_verify_key(path: str) -> VerifyKey:
 
 
 class ProofEngine:
-    """Creates and verifies hash-chained, Ed25519-signed proof envelopes."""
+    """Creates and verifies hash-chained, Ed25519-signed proof envelopes.
+
+    Thin adapter over the kernel: ``create_commitment`` delegates to
+    ``ario_proof.sign_envelope`` and ``verify_commitment`` to
+    ``ario_proof.verify_envelope``. The class continues to own key persistence
+    and translates the kernel's ``VerificationResult`` dataclass into the
+    historical mlflow dict shape so the rest of the plugin's call sites and
+    test fixtures keep working without churn.
+    """
 
     def __init__(self, private_key_path: str | None = None, public_key_path: str | None = None):
-        # Try env var first, then key files, then auto-generate
         sk = load_signing_key_from_env()
         if sk:
             self._sk = sk
@@ -134,15 +146,6 @@ class ProofEngine:
             pub = public_key_path or os.path.expanduser("~/.ario-mlflow/keys/ed25519_public.json")
             self._sk, self._vk = generate_keypair(priv, pub)
 
-    # ------------------------------------------------------------------
-    # Pure-commitment envelope (~300 bytes on Arweave).
-    #
-    # Used by the plugin's headline API: ``anchor()``,
-    # ``ArioMlflowClient``, ``VerifiedModel``. Phase 2.E deleted the
-    # legacy ``create_proof`` / ``verify_local`` methods that produced
-    # the v1 record-bearing envelope shape.
-    # ------------------------------------------------------------------
-
     def create_commitment(
         self,
         *,
@@ -153,40 +156,28 @@ class ProofEngine:
         event_id: str | None = None,
         signed_at: str | None = None,
     ) -> dict:
-        """Create a pure-commitment proof envelope.
+        """Create a pure-commitment proof envelope (~300 bytes on Arweave).
 
         Args:
             event_type: One of ``"training_complete"``, ``"model_registered"``,
                 ``"prediction"``.
             subject: Identifies the source of the canonical bytes — e.g.
-                ``{"type": "mlflow_run", "run_id": "..."}`` or
-                ``{"type": "mlflow_model_version", "name": "...",
-                "version": "..."}``. Verifiers use this to find the source
-                data when re-deriving the commitment.
+                ``{"type": "mlflow_run", "run_id": "..."}``.
             payload_bytes: The exact canonical bytes that were committed to
-                (caller produces these via :func:`canonical_json` of whatever
-                it wants to commit). The SHA-256 hex digest becomes
-                ``payload_hash``.
+                (caller produces these via :func:`canonical_json`). The SHA-256
+                hex digest becomes ``payload_hash`` — external-commitment
+                binding (envelope-spec §3.1), so ``payload`` itself is NOT
+                embedded.
             previous_hash: Hash of the predecessor in the chain, or
-                ``"GENESIS"``. For training proofs, the prior training
-                proof's ``payload_hash`` of the same registered model. For
-                registration, the source run's ``ario.training_tx``. For
-                predictions, the model version's ``ario.registration_tx``.
-            event_id: Optional caller-provided UUID; auto-generated if
-                omitted.
+                ``"GENESIS"``.
+            event_id: Optional caller-provided UUID; auto-generated if omitted.
             signed_at: Optional ISO8601 timestamp; current UTC if omitted.
 
         Returns:
-            The signed envelope: ``event_id``, ``event_type``, ``subject``,
-            ``payload_hash``, ``previous_hash``, ``signed_at``,
-            ``public_key``, ``signature``. ~300 bytes.
-
-        Note:
-            The signature covers the full envelope minus the signature
-            field itself (including ``public_key``). A verifier with no
-            external trust anchor can confirm only "the holder of the
-            private key matching ``public_key`` produced this signature";
-            trust in *whose* key it is must come from out of band.
+            The signed envelope, ready to upload. Includes ``public_key``
+            (derived from the signing key) and ``signature`` (Ed25519 over
+            the JCS-canonicalized signed scope, per
+            ``ario_proof.envelope_for_signature``).
         """
         envelope = {
             "event_id": event_id or str(uuid.uuid4()),
@@ -195,12 +186,9 @@ class ProofEngine:
             "payload_hash": hash_data(payload_bytes),
             "previous_hash": previous_hash,
             "signed_at": signed_at or datetime.now(timezone.utc).isoformat(),
-            "public_key": bytes(self._vk).hex(),
             "spec_version": SPEC_VERSION,
         }
-        signed = self._sk.sign(canonical_json(envelope))
-        envelope["signature"] = signed.signature.hex()
-        return envelope
+        return _kernel_sign_envelope(envelope, self._sk)
 
     def verify_commitment(
         self,
@@ -209,77 +197,54 @@ class ProofEngine:
     ) -> dict:
         """Verify a pure-commitment proof envelope.
 
-        Always checks the signature. If ``payload_bytes`` is provided,
-        also re-hashes them and compares to ``envelope["payload_hash"]``
-        — this is check 2 of the four-check verification flow. To run
-        check 3 (live MLflow vs. anchored payload), the caller re-derives
-        canonical bytes from current MLflow state and passes them here.
+        Delegates to ``ario_proof.verify_envelope`` and translates the
+        ``VerificationResult`` dataclass into the dict shape mlflow consumers
+        (``verify.verify_signature``, ``test_plugin_smoke``,
+        ``test_plugin_verify``, the CLI report) expect.
 
         Args:
             envelope: The signed envelope.
-            payload_bytes: Optional bytes to hash and compare. If
-                ``None``, only the signature is checked.
+            payload_bytes: Optional bytes to hash and compare to
+                ``envelope["payload_hash"]`` — check 2 of the four-check flow.
 
         Returns:
-            ``signature_valid`` (bool); ``payload_hash_valid`` (bool or
-            ``None`` when not checked); ``computed_payload_hash`` (str
-            or ``None``); ``stored_payload_hash`` (str);
-            ``spec_version_status`` (one of ``"supported"``,
-            ``"legacy"``, ``"unsupported"``); ``legacy_envelope`` (bool
-            — true when the envelope predates the ``spec_version``
-            field); ``overall`` (bool — ``True`` only when signature
-            valid *and* hash valid if checked *and* spec is not
-            unsupported); ``reason`` (only set when spec is
-            unsupported).
+            Dict with: ``signature_valid``, ``payload_hash_valid``,
+            ``computed_payload_hash``, ``stored_payload_hash``,
+            ``spec_version_status`` (one of ``"supported"``, ``"legacy"``,
+            ``"unsupported"``), ``legacy_envelope``, ``overall``, and
+            ``reason`` (only when ``spec_version_status == "unsupported"``).
         """
-        spec_status, spec_reason = _classify_spec_version(envelope)
-        sig_valid = False
-        try:
-            # Reconstruct the signed body. Strip:
-            # - ``signature`` itself (it was added after signing).
-            # - Any caller-attached annotation keys (underscore-prefixed,
-            #   e.g. ``_tx_id`` injected so verify_ario_attestation can
-            #   route the call). By convention, ``_*`` keys are
-            #   out-of-band routing metadata, not part of the signed
-            #   protocol. Without this, full_verify would falsely fail
-            #   the signature check when called with an envelope that
-            #   any other check needs to annotate.
-            body = {
-                k: v for k, v in envelope.items()
-                if k != "signature" and not k.startswith("_")
-            }
-            vk = VerifyKey(bytes.fromhex(envelope["public_key"]))
-            vk.verify(canonical_json(body), bytes.fromhex(envelope["signature"]))
-            sig_valid = True
-        except Exception:  # noqa: BLE001 — any verification failure (decode, key shape, signature mismatch) keeps sig_valid=False; verifier must not crash on adversarial input
-            pass
-
-        payload_hash_valid: bool | None = None
-        computed_hash: str | None = None
-        if payload_bytes is not None:
-            computed_hash = hash_data(payload_bytes)
-            payload_hash_valid = computed_hash == envelope.get("payload_hash")
-
-        # overall is True only if signature is valid AND (payload not
-        # checked OR payload check passed) AND the spec_version is not
-        # explicitly unsupported. Absent (legacy) and supported both
-        # pass; only an envelope that advertises a spec major this
-        # build doesn't know about is a hard fail.
-        overall = (
-            sig_valid
-            and (payload_hash_valid is not False)
-            and spec_status != "unsupported"
+        # ``allow_legacy=True`` preserves the historical behavior of accepting
+        # envelopes anchored before ``spec_version`` shipped (the only mlflow
+        # envelopes on Arweave that lack the field).
+        result = _kernel_verify_envelope(
+            envelope if isinstance(envelope, dict) else {},
+            payload_bytes=payload_bytes,
+            allow_legacy=True,
         )
 
-        result = {
-            "signature_valid": sig_valid,
-            "payload_hash_valid": payload_hash_valid,
-            "computed_payload_hash": computed_hash,
-            "stored_payload_hash": envelope.get("payload_hash"),
+        # Synthesize the trichotomy from the kernel's binary signal + legacy
+        # flag. ``spec_version_status`` is part of the mlflow result contract;
+        # callers (verify_signature, tests, the CLI report) branch on it.
+        spec_version = (envelope or {}).get("spec_version") if isinstance(envelope, dict) else None
+        if spec_version is None:
+            spec_status = "legacy"
+        elif result.spec_version_ok:
+            spec_status = "supported"
+        else:
+            spec_status = "unsupported"
+
+        computed = sha256_hex(payload_bytes) if payload_bytes is not None else None
+
+        out: dict = {
+            "signature_valid": result.signature_ok,
+            "payload_hash_valid": result.payload_hash_ok,
+            "computed_payload_hash": computed,
+            "stored_payload_hash": (envelope or {}).get("payload_hash") if isinstance(envelope, dict) else None,
             "spec_version_status": spec_status,
-            "legacy_envelope": spec_status == "legacy",
-            "overall": overall,
+            "legacy_envelope": result.legacy_envelope,
+            "overall": result.ok,
         }
-        if spec_reason is not None:
-            result["reason"] = spec_reason
-        return result
+        if spec_status == "unsupported":
+            out["reason"] = "unsupported_spec_version"
+        return out

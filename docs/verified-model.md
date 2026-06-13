@@ -36,16 +36,37 @@ behaves exactly as before (artifact integrity check only).
 
 ## Gate ordering
 
-1. **Agent verify-status** — one local HTTP read of agent state. Never triggers
-   a re-verify, never makes a network call beyond the agent/proxy.
+1. **Agent verify-status** — one local HTTP read of agent state on the
+   loopback management port. Never triggers a re-verify, never makes a
+   network call beyond the agent.
 2. **Artifact integrity** — re-hash artifacts vs `ario.artifact_hash`
    (downloads artifacts; this is why the cheap agent check runs first).
 3. **pyfunc load** — user code executes only after both gates pass.
 
-The gate runs at **load time only**. A tamper the agent detects *after* the
-constructor returns is not re-checked on `predict()` — per-predict re-checking
-(with the contract's 10–30s caching guidance) is a planned follow-up. Restart
-or reconstruct `VerifiedModel` to re-gate.
+By default, the gate runs at **load time only**. Pass
+`recheck_per_predict=True` to additionally re-run the gate at the top of
+every `predict()` call — a tamper the agent detects *after* the constructor
+returns then refuses subsequent inference too. Pair with
+`recheck_max_cache_age=N` to opt into the contract §9.2 hot-path cache (10–30s
+is the contract's guidance); leave `None` (the default) to consult the agent
+fresh on every prediction.
+
+```python
+model = VerifiedModel(
+    "models:/fraud-detector@production",
+    asset_id="fraud-model",
+    verify_status_client=client,
+    on_failure="fail_closed",
+    recheck_per_predict=True,         # re-run the gate on every predict()
+    recheck_max_cache_age=15.0,       # § 9.2 hot path: at most one fetch per 15s
+)
+```
+
+`on_failure` semantics carry through identically: `"raise"` / `"fail_closed"`
+on a failed per-predict gate raise the same typed exceptions and short-circuit
+**before** inference; `"fail_open"` logs a structured WARN tagged
+`phase="predict"` (vs. `phase="load"` at the constructor) and proceeds — so
+SIEM pipelines can distinguish per-predict bypasses from load-time ones.
 
 ## Failure-mode matrix
 

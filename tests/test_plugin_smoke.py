@@ -419,6 +419,45 @@ def test_verify_signature_wrapper_surfaces_spec_version_state(tmp_path):
     assert out["reason"] == "unsupported_spec_version"
 
 
+def test_verify_commitment_rejects_underscore_injection_on_agent_envelope(tmp_path):
+    """Profile-conditional ``_*`` strip: only mlflow envelopes are lenient.
+
+    The shared kernel strips underscore-prefixed annotation keys before
+    canonicalizing the signed scope ONLY for the ``ario.mlflow/v1`` profile
+    and pre-``spec_version`` legacy envelopes. ``ario.agent/v1`` envelopes
+    are signed strictly — an injected ``_*`` key must invalidate the
+    signature, the same as any other unsigned-field tamper. This test
+    pins the asymmetry so a future kernel change can't silently re-introduce
+    the historical lenience on cross-product envelopes.
+    """
+    from nacl.signing import VerifyKey
+
+    vector_path = Path(__file__).parent / "fixtures" / "agent-envelope-asset-registered-01.json"
+    vector = json.loads(vector_path.read_text())
+
+    envelope = dict(vector["inputs"]["envelope_pre_signature"])
+    envelope["public_key"] = vector["fixed_keypair"]["ed25519_public_hex"]
+    envelope["payload_hash"] = vector["expected_outputs"]["payload_hash_hex"]
+    envelope["signature"] = vector["expected_outputs"]["signature_hex"]
+
+    engine = ProofEngine(str(tmp_path / "priv"), str(tmp_path / "pub"))
+
+    # Sanity: clean agent envelope verifies (the cross-product case).
+    assert engine.verify_commitment(envelope)["signature_valid"] is True
+
+    # Inject a caller-attached ``_*`` annotation onto the agent envelope.
+    # Under the kernel's strict rules this must FAIL — the strip is
+    # profile-conditional, so the injection lands inside the signed scope.
+    tampered = dict(envelope)
+    tampered["_attacker_routing"] = "EVIL"
+    result = engine.verify_commitment(tampered)
+    assert result["signature_valid"] is False, (
+        "_* injection on an ario.agent/v1 envelope must invalidate the "
+        "signature — the kernel does not strip annotation keys for that "
+        "profile"
+    )
+
+
 def test_verify_commitment_accepts_cross_product_agent_envelope(tmp_path):
     """Plugin verifies envelopes minted by the sister ar-io-agent (Go daemon).
 

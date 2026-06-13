@@ -210,9 +210,11 @@ def test_fail_open_logs_warning_and_proceeds(mlflow_calls, caplog):
     assert mlflow_calls == ["integrity", "load"]
     [record] = [r for r in caplog.records if "fail_open" in r.message]
     assert record.levelno == logging.WARNING
-    # Structured fields for SIEM pipelines.
+    # Structured fields for SIEM pipelines. ``phase`` distinguishes the
+    # load-time gate from the per-predict re-check (when enabled).
     assert record.ario_verify_status == {
         "asset_id": "fraud-model",
+        "phase": "load",
         "error": "AssetTamperedError",
         "outcome": "tampered",
         "stale": False,
@@ -240,6 +242,193 @@ def test_transport_error_fail_open_proceeds_with_warning(mlflow_calls, caplog):
     [record] = [r for r in caplog.records if "fail_open" in r.message]
     assert record.ario_verify_status["error"] == "VerifyStatusTransportError"
     assert record.ario_verify_status["outcome"] is None  # no status received
+
+
+# --- per-predict re-check (opt-in via recheck_per_predict=True) --------------
+
+
+def _stub_for_predict(monkeypatch):
+    """Stub the MLflow surfaces VerifiedModel touches during ``predict``.
+
+    Returns a fake-anchor sentinel the caller can wire into the constructor.
+    Mirrors the pattern from ``test_plugin_smoke.py``'s predict tests but
+    skips registry resolution (mv lookup returns None so run_id stays
+    ``"unknown"`` and no integrity check fires).
+    """
+    import ario_mlflow.model as model_module
+
+    monkeypatch.setattr(model_module, "_resolve_model_version", lambda c, u: None)
+    monkeypatch.setattr(
+        model_module.mlflow.pyfunc,
+        "load_model",
+        lambda uri: type("M", (), {"predict": lambda self, x: [1]})(),
+    )
+    monkeypatch.setattr(
+        model_module.mlflow.tracking, "MlflowClient", lambda: type("C", (), {})()
+    )
+    monkeypatch.setattr(
+        model_module.mlflow, "get_active_trace_id", lambda: None, raising=False
+    )
+
+    class _FakeAnchor:
+        enabled = False
+
+        def upload_proof(self, env, *a, **kw):
+            return None
+
+    return _FakeAnchor()
+
+
+def test_recheck_per_predict_requires_verify_status_client():
+    """``recheck_per_predict=True`` alone is meaningless — should fail at
+    construction with a clear ValueError, the same shape as the other
+    "kwargs must come together" errors."""
+    from ario_mlflow.model import VerifiedModel
+
+    with pytest.raises(ValueError, match="recheck_per_predict"):
+        VerifiedModel("models:/foo/1", recheck_per_predict=True)
+
+
+def test_default_recheck_is_off_predict_does_not_call_client(monkeypatch):
+    """Backward-compat: without ``recheck_per_predict=True``, the predict
+    path makes ZERO verify-status calls — the legacy load-time-only gate
+    behavior holds exactly as before."""
+    from ario_mlflow.model import VerifiedModel
+
+    client = FakeVerifyStatusClient(status=make_status())
+    anchor = _stub_for_predict(monkeypatch)
+
+    vm = VerifiedModel(
+        "models:/foo/1",
+        asset_id="fraud-model",
+        verify_status_client=client,
+        anchor=anchor,
+    )
+    # One call at __init__; nothing more.
+    assert client.calls == ["fraud-model"]
+
+    vm.predict([1.0, 2.0])
+    assert client.calls == ["fraud-model"], (
+        "predict() must not consult the agent unless recheck_per_predict=True"
+    )
+
+
+def test_recheck_per_predict_consults_client_each_call(monkeypatch):
+    """``recheck_per_predict=True`` and ``recheck_max_cache_age=None``
+    (the default) consult the agent on every ``predict()``. Fresh status
+    is the §9.1 stance — caching ``outcome``/``stale`` for gating decisions
+    is opt-in only."""
+    from ario_mlflow.model import VerifiedModel
+
+    client = FakeVerifyStatusClient(status=make_status())
+    anchor = _stub_for_predict(monkeypatch)
+
+    vm = VerifiedModel(
+        "models:/foo/1",
+        asset_id="fraud-model",
+        verify_status_client=client,
+        anchor=anchor,
+        recheck_per_predict=True,
+    )
+    # One call from __init__, plus one per predict.
+    vm.predict([1.0, 2.0])
+    vm.predict([3.0, 4.0])
+    assert client.calls == ["fraud-model", "fraud-model", "fraud-model"]
+
+
+def test_recheck_per_predict_tampered_raises_before_inference(monkeypatch):
+    """Tamper detected by the agent AFTER load — the per-predict gate
+    refuses subsequent inference (under default ``on_failure="raise"``)."""
+    from ario_mlflow.model import VerifiedModel
+
+    client = FakeVerifyStatusClient(status=make_status())
+    anchor = _stub_for_predict(monkeypatch)
+
+    vm = VerifiedModel(
+        "models:/foo/1",
+        asset_id="fraud-model",
+        verify_status_client=client,
+        anchor=anchor,
+        recheck_per_predict=True,
+    )
+
+    # Flip the agent's verdict to "tampered" between load and predict.
+    client._status = make_status(outcome="tampered")
+
+    with pytest.raises(AssetTamperedError):
+        vm.predict([1.0, 2.0])
+
+
+def test_recheck_per_predict_fail_open_logs_phase_predict(monkeypatch, caplog):
+    """fail_open under per-predict gate proceeds with inference and logs
+    a structured WARN tagged ``phase="predict"`` — distinct from the
+    load-time gate's ``phase="load"`` so SIEM pipelines can route them
+    separately."""
+    from ario_mlflow.model import VerifiedModel
+
+    client = FakeVerifyStatusClient(status=make_status())
+    anchor = _stub_for_predict(monkeypatch)
+
+    vm = VerifiedModel(
+        "models:/foo/1",
+        asset_id="fraud-model",
+        verify_status_client=client,
+        anchor=anchor,
+        recheck_per_predict=True,
+        on_failure="fail_open",
+    )
+    client._status = make_status(outcome="tampered")
+
+    with caplog.at_level(logging.WARNING, logger="ario_mlflow.model"):
+        result = vm.predict([1.0, 2.0])
+
+    # Prediction proceeded.
+    assert result.prediction == [1]
+    # Structured log carries phase="predict" and the tampered outcome.
+    [record] = [
+        r for r in caplog.records
+        if "fail_open" in r.message and r.ario_verify_status.get("phase") == "predict"
+    ]
+    assert record.ario_verify_status["error"] == "AssetTamperedError"
+    assert record.ario_verify_status["outcome"] == "tampered"
+    assert "prediction" in record.message  # phrasing reflects the phase
+
+
+def test_recheck_per_predict_honors_max_cache_age(monkeypatch):
+    """``recheck_max_cache_age`` flows straight into
+    ``VerifyStatusClient.get(max_cache_age=...)`` — the §9.2 hot-path knob.
+    The client's own cache is responsible for de-duping (tested in
+    ``test_verify_status_client``); here we just pin the wiring."""
+    from ario_mlflow.model import VerifiedModel
+
+    received_kwargs: list[dict] = []
+
+    class _RecordingClient:
+        def __init__(self):
+            self._status = make_status()
+            self.calls: list[str] = []
+
+        def get(self, asset_id, **kwargs):
+            self.calls.append(asset_id)
+            received_kwargs.append(kwargs)
+            return self._status
+
+    client = _RecordingClient()
+    anchor = _stub_for_predict(monkeypatch)
+
+    vm = VerifiedModel(
+        "models:/foo/1",
+        asset_id="fraud-model",
+        verify_status_client=client,
+        anchor=anchor,
+        recheck_per_predict=True,
+        recheck_max_cache_age=15.0,
+    )
+    vm.predict([1.0, 2.0])
+
+    # Two gets: one at load (max_cache_age=None — fresh), one at predict
+    # (max_cache_age=15.0 — opt-in §9.2 hot-path cache).
+    assert [kw.get("max_cache_age") for kw in received_kwargs] == [None, 15.0]
 
 
 def test_fail_open_does_not_swallow_integrity_error(monkeypatch, caplog):

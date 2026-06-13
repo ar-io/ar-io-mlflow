@@ -10,12 +10,16 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`VerifyStatusClient`** (`ario_mlflow.verify_status_client`) — consumer client
   for the ar-io-agent `GET /v1/verify-status/<asset_id>` endpoint (wire contract:
-  `ar-io-agent/docs/verify-status-api.md`, v1.2 Lane A). Supports both deployment
-  forms: the same-host management port (`secret=` → `X-Ario-Management-Secret`)
-  and the api-guard proxy (`api_key=` → `Authorization: Bearer`). Branches on
-  HTTP status codes only, normalizes unrecognized outcomes to `unknown`, ignores
-  unknown response fields (contract §10), and offers opt-in monotonic-clock
-  response caching for hot-path consumers (contract §9.2).
+  `ar-io-agent/docs/verify-status-api.md`, v1.2 Lane A). The endpoint is
+  loopback-only by design (`127.0.0.1:9847`); pass `secret=` →
+  `X-Ario-Management-Secret`. The `api_key=` constructor branch is a
+  **forward-compatibility reservation** with no server-side counterpart today —
+  the cross-host proxy route proposed early in v1.2 was withdrawn before
+  implementation (it would have required api-guard→agent connectivity
+  contradicting the loopback-bind invariant). Branches on HTTP status codes
+  only, normalizes unrecognized outcomes to `unknown`, ignores unknown response
+  fields (contract §10), and offers opt-in monotonic-clock response caching for
+  hot-path consumers (contract §9.2).
 - **Typed verify-status exception family** (`ario_mlflow.errors`) —
   `AssetVerificationError` (family root), `VerifyStatusError`,
   `AssetTamperedError`, `AssetStaleError`, `AssetMissingError`,
@@ -31,13 +35,44 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tampered/missing/stale/unknown per the contract §9.1 mapping. `on_failure`:
   `"raise"` (default) and `"fail_closed"` raise the typed exception;
   `"fail_open"` logs at WARN with structured SIEM fields
-  (`extra["ario_verify_status"]`: asset_id, outcome, stale, policy_hash,
+  (`extra["ario_verify_status"]`: asset_id, phase, outcome, stale, policy_hash,
   current_tx_id) and proceeds. Absent the new kwargs, behavior is byte-for-byte
-  unchanged. Gating is load-time only in this release; per-predict re-checking
-  (contract §9.2's 10–30s cache cadence) is a planned follow-up.
+  unchanged.
+- **`VerifiedModel` per-predict re-checking** — two new opt-in
+  keyword-only arguments on `VerifiedModel.__init__`:
+  `recheck_per_predict: bool = False` re-runs the verify-status gate at the
+  top of every `predict()` call (a tamper detected by the agent after load
+  then refuses subsequent inference too); `recheck_max_cache_age: float | None
+  = None` forwards into `VerifyStatusClient.get(max_cache_age=...)` for the
+  contract §9.2 hot-path cache (10–30s is the contract's guidance), with
+  `None` always fetching fresh. The same `on_failure` policy applies — the
+  structured WARN log carries `phase="predict"` so SIEM can distinguish
+  per-predict bypasses from load-time ones. Default-off; absent the new
+  kwargs, predict() makes zero verify-status calls.
 
 ### Changed
 
+- **Verification primitives migrated to the shared `ar-io-proof` kernel**
+  (PyPI `ar-io-proof>=0.1.1`, conformance-gated against `test-vectors-v1.0`).
+  `ario_mlflow.proof` is now a thin adapter: `ProofEngine.create_commitment`
+  delegates to `ario_proof.sign_envelope`, `verify_commitment` to
+  `ario_proof.verify_envelope`. Mlflow's historical dict shape
+  (`signature_valid`, `payload_hash_valid`, `spec_version_status`, …) is
+  preserved for back-compat; key persistence (file format, env loading,
+  auto-generate) stays plugin-owned. Three classes of latent lenience the
+  in-tree code carried are now correctly enforced by the kernel: (1) the
+  `_*` annotation-key strip is profile-conditional — `ario.agent/v1`
+  envelopes with injected `_*` keys now FAIL signature verification
+  (mlflow envelopes still strip, preserving the historical convention);
+  (2) inline `payload` is now re-hashed against `payload_hash` when
+  present (mlflow profiles bind externally and don't carry inline payload,
+  so this affects only ingested foreign envelopes); (3) `verify_proof_by_tx`
+  no longer mutates the fetched envelope to attach `_tx_id` — the TX ID
+  is now routed out-of-band via a new `tx_id=` keyword on
+  `verify_ario_attestation` / `verify_record` / `full_verify`. Legacy
+  envelopes (no `spec_version`) continue to verify (`allow_legacy=True`).
+  Top-level `jcs` dep dropped (the kernel carries it transitively); no
+  in-tree code imports `jcs` directly.
 - `IntegrityError` now subclasses `ario_mlflow.errors.AssetVerificationError`
   (previously bare `Exception`; backward-compatible) so one
   `except AssetVerificationError` clause catches both load-time gates —

@@ -628,6 +628,7 @@ def verify_ario_attestation(
     ario_client: "ArioVerifyClient | None",
     *,
     min_attestation_level: int = DEFAULT_MIN_ATTESTATION_LEVEL,
+    tx_id: str | None = None,
 ) -> dict:
     """Check 4 (optional): ar.io Verify attestation level.
 
@@ -638,8 +639,12 @@ def verify_ario_attestation(
     "passing strict bar" from "below threshold but maturing."
 
     Args:
-        envelope: The signed envelope. Must carry ``_tx_id`` or
-            ``arweave_tx_id`` so the call can be routed.
+        envelope: The signed envelope. Only consulted for ``_tx_id`` /
+            ``arweave_tx_id`` when the explicit ``tx_id=`` keyword is
+            not supplied — prefer the keyword form, since the shared
+            kernel does not strip ``_*`` keys for ``ario.agent/v1``
+            envelopes and a mutated agent envelope would fail signature
+            verification under the kernel's strict rules.
         ario_client: An ``ArioVerifyClient``. ``None`` or disabled
             client returns ``ok=None`` ("not applicable" / "not
             checked").
@@ -647,6 +652,9 @@ def verify_ario_attestation(
             Defaults to ``DEFAULT_MIN_ATTESTATION_LEVEL`` (2). Pass
             ``3`` for strict audit. Pass ``1`` to accept "TX is at
             least indexed."
+        tx_id: Arweave TX ID for the proof, routed out-of-band. Preferred
+            over reading from ``envelope["_tx_id"]`` — keeps the envelope
+            dict pure for verifiers.
 
     Returns:
         Dict with ``ok``, ``attestation_level``, ``attested_by``,
@@ -657,13 +665,12 @@ def verify_ario_attestation(
     if ario_client is None or not getattr(ario_client, "enabled", False):
         return {"ok": None, "reason": "ario_verify_not_enabled"}
 
-    # Pull the Arweave TX ID from wherever it's stored. The envelope
-    # itself doesn't carry the TX (the TX is the address ON Arweave) —
-    # callers passing an envelope here are expected to also know the
-    # TX, typically from MLflow tags (ario.training_tx, etc.). For now
-    # we accept it via a special key the caller adds; future API may
-    # split the envelope and the TX more cleanly.
-    tx_id = envelope.get("_tx_id") or envelope.get("arweave_tx_id")
+    # Prefer the explicit kwarg; fall back to envelope keys for callers that
+    # haven't migrated. The envelope-mutation path remains for the mlflow
+    # profile (the kernel strips ``_*`` from its signed scope) but is no
+    # longer the recommended shape.
+    if tx_id is None:
+        tx_id = envelope.get("_tx_id") or envelope.get("arweave_tx_id")
     if not tx_id:
         return {"ok": None, "reason": "no_tx_id_provided"}
 
@@ -757,6 +764,7 @@ def full_verify(
     mlflow_client=None,
     ario_client: "ArioVerifyClient | None" = None,
     min_attestation_level: int = DEFAULT_MIN_ATTESTATION_LEVEL,
+    tx_id: str | None = None,
 ) -> dict:
     """Run all four checks and return a combined result.
 
@@ -765,6 +773,14 @@ def full_verify(
     the rules in :func:`_compute_overall_ok`: training and registration
     envelopes require all three local checks to pass; other event types
     are more permissive about None results.
+
+    ``tx_id`` is routed straight to :func:`verify_ario_attestation` instead
+    of mutating the envelope dict — the shared verification kernel does
+    not strip ``_*`` keys from the signed scope of ``ario.agent/v1``
+    envelopes, so mutation would invalidate signatures on cross-product
+    envelopes. Callers that still pass the TX via ``envelope["_tx_id"]``
+    keep working for mlflow envelopes (the kernel strips ``_*`` from
+    those) but should migrate to the keyword.
     """
     sig = verify_signature(envelope, proof_engine)
     bytes_check = (
@@ -777,7 +793,12 @@ def full_verify(
         else {"ok": None, "reason": "no_payload_to_compare"}
     )
     ario = (
-        verify_ario_attestation(envelope, ario_client, min_attestation_level=min_attestation_level)
+        verify_ario_attestation(
+            envelope,
+            ario_client,
+            min_attestation_level=min_attestation_level,
+            tx_id=tx_id,
+        )
         if ario_client else {"ok": None, "reason": "no_ario_client"}
     )
 
@@ -840,6 +861,7 @@ def verify_record(
     proof_engine: ProofEngine,
     ario_client: "ArioVerifyClient | None" = None,
     min_attestation_level: int = DEFAULT_MIN_ATTESTATION_LEVEL,
+    tx_id: str | None = None,
 ) -> dict:
     """Verify a record from a portable bundle (auditor-shaped primitive).
 
@@ -886,7 +908,12 @@ def verify_record(
     bytes_check = _verify_canonical_bytes_match(envelope, canonical_bytes)
 
     ario = (
-        verify_ario_attestation(envelope, ario_client, min_attestation_level=min_attestation_level)
+        verify_ario_attestation(
+            envelope,
+            ario_client,
+            min_attestation_level=min_attestation_level,
+            tx_id=tx_id,
+        )
         if ario_client else {"ok": None, "reason": "no_ario_client"}
     )
 
@@ -964,19 +991,19 @@ def verify_proof_by_tx(
             "overall": None,
         }
 
-    # Caller-attached metadata. _tx_id flows through to the ar.io
-    # attestation check; underscore-prefixed keys are stripped before
-    # signature canonicalization (see test_verify_commitment_ignores_
-    # underscore_prefixed_caller_annotations) so this doesn't break
-    # check 1.
-    plugin_envelope["_tx_id"] = tx_id
-
+    # Route ``tx_id`` out-of-band to ``verify_ario_attestation`` rather than
+    # mutating the envelope. The shared kernel does not strip ``_*`` keys
+    # from the signed scope of ``ario.agent/v1`` envelopes (only from the
+    # mlflow profile + pre-spec_version legacy envelopes), so a mutated
+    # cross-product envelope would now fail signature verification. The
+    # keyword form is profile-agnostic.
     result = full_verify(
         plugin_envelope,
         proof_engine=proof_engine,
         mlflow_client=mlflow_client,
         ario_client=ario_client,
         min_attestation_level=min_attestation_level,
+        tx_id=tx_id,
     )
     result["proof_found"] = True
     return result
