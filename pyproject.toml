@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ar-io-mlflow"
-version = "0.2.4"
+version = "0.3.0"
 description = "ar.io MLflow plugin — verifiable provenance for the ML lifecycle"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -41,7 +41,7 @@ dependencies = [
     "turbo-sdk>=0.1.0",
     "requests>=2.31.0",
     "cryptography>=41.0.0",
-    "ar-io-proof>=0.1.1",
+    "ar-io-proof>=0.2.0",
 ]
 
 [project.optional-dependencies]

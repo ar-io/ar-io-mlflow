@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-06-15
+
 ### Added
 
 - **`VerifyStatusClient`** (`ario_mlflow.verify_status_client`) — consumer client
@@ -77,6 +79,23 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (previously bare `Exception`; backward-compatible) so one
   `except AssetVerificationError` clause catches both load-time gates —
   artifact re-hash and agent verify-status.
+- `cli._verify_envelope_for_tx` now routes the Arweave TX ID to
+  `verify_ario_attestation` via the `tx_id=` keyword instead of mutating
+  the fetched envelope in place. Same downstream behavior for the mlflow
+  profile envelopes the CLI handles; aligns with the profile-agnostic
+  pattern PR #20 established in `verify_proof_by_tx`.
+
+### Fixed
+
+- `verify_commitment` / `verify_signature` now classify malformed (non-dict)
+  input as `spec_version_status="unsupported"` (not `"legacy"`) with
+  `reason="envelope_not_a_json_object"`. The kernel-adapter was coercing
+  non-dict input to `{}`, which the kernel then treated as a legacy
+  envelope — producing misleading labels (`overall=False` was always
+  correct; the labels propagate to CLI panels, logs, and audit-export
+  JSON, so consistency matters). `verify_signature` now propagates the
+  precise `reason` instead of always overwriting with the generic
+  `unsupported_spec_version`.
 
 ## [0.2.4] — 2026-05-28
 
