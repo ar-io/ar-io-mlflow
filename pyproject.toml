@@ -41,7 +41,7 @@ dependencies = [
     "turbo-sdk>=0.1.0",
     "requests>=2.31.0",
     "cryptography>=41.0.0",
-    "ar-io-proof>=0.1.1",
+    "ar-io-proof>=0.2.0",
 ]
 
 [project.optional-dependencies]
