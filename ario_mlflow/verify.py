@@ -479,7 +479,11 @@ def verify_signature(envelope: dict, proof_engine: ProofEngine) -> dict:
         "legacy_envelope": legacy,
     }
     if spec_status == "unsupported":
-        out["reason"] = "unsupported_spec_version"
+        # Propagate the more precise diagnostic from verify_commitment when
+        # available (e.g. ``envelope_not_a_json_object`` for malformed input);
+        # fall back to the generic ``unsupported_spec_version`` when the
+        # envelope had a real-but-unknown spec major.
+        out["reason"] = result.get("reason", "unsupported_spec_version")
     return out
 
 
