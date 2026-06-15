@@ -442,6 +442,23 @@ def test_verify_signature_wrapper_surfaces_spec_version_state(tmp_path):
     assert out["reason"] == "unsupported_spec_version"
 
 
+def test_verify_signature_surfaces_specific_reason_for_non_dict_input(tmp_path):
+    """``verify_signature`` should pass the precise diagnostic from
+    ``verify_commitment`` through (``envelope_not_a_json_object`` for
+    malformed input) rather than always overwriting with the generic
+    ``unsupported_spec_version``. ``ok=False`` is the safety guarantee;
+    the precise ``reason`` is for diagnostics."""
+    from ario_mlflow.verify import verify_signature
+
+    engine = ProofEngine(str(tmp_path / "priv"), str(tmp_path / "pub"))
+    out = verify_signature(None, engine)
+    assert out["ok"] is False
+    assert out["signature_valid"] is False
+    assert out["spec_version_status"] == "unsupported"
+    assert out["legacy_envelope"] is False
+    assert out["reason"] == "envelope_not_a_json_object"
+
+
 def test_verify_commitment_rejects_underscore_injection_on_agent_envelope(tmp_path):
     """Profile-conditional ``_*`` strip: only mlflow envelopes are lenient.
 
