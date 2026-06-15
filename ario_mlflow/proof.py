@@ -216,18 +216,30 @@ class ProofEngine:
         """
         # ``allow_legacy=True`` preserves the historical behavior of accepting
         # envelopes anchored before ``spec_version`` shipped (the only mlflow
-        # envelopes on Arweave that lack the field).
+        # envelopes on Arweave that lack the field). The kernel handles
+        # non-dict input directly (returns a fully-failed VerificationResult
+        # with ``legacy_envelope=False``), so pass it through unchanged
+        # instead of coercing — coercing non-dict → ``{}`` would land in the
+        # kernel's empty-dict-is-legacy branch and produce ``legacy_envelope
+        # =True``, which misclassifies malformed input as a legacy envelope.
         result = _kernel_verify_envelope(
-            envelope if isinstance(envelope, dict) else {},
+            envelope,
             payload_bytes=payload_bytes,
             allow_legacy=True,
         )
 
+        is_dict = isinstance(envelope, dict)
+        spec_version = envelope.get("spec_version") if is_dict else None
+
         # Synthesize the trichotomy from the kernel's binary signal + legacy
         # flag. ``spec_version_status`` is part of the mlflow result contract;
         # callers (verify_signature, tests, the CLI report) branch on it.
-        spec_version = (envelope or {}).get("spec_version") if isinstance(envelope, dict) else None
-        if spec_version is None:
+        # Non-dict input is malformed, not legacy: label it ``unsupported``
+        # so the result reads coherently (e.g. ``spec_status=="unsupported"``
+        # never appears alongside ``legacy_envelope=True``).
+        if not is_dict:
+            spec_status = "unsupported"
+        elif spec_version is None:
             spec_status = "legacy"
         elif result.spec_version_ok:
             spec_status = "supported"
@@ -240,11 +252,11 @@ class ProofEngine:
             "signature_valid": result.signature_ok,
             "payload_hash_valid": result.payload_hash_ok,
             "computed_payload_hash": computed,
-            "stored_payload_hash": (envelope or {}).get("payload_hash") if isinstance(envelope, dict) else None,
+            "stored_payload_hash": envelope.get("payload_hash") if is_dict else None,
             "spec_version_status": spec_status,
             "legacy_envelope": result.legacy_envelope,
             "overall": result.ok,
         }
         if spec_status == "unsupported":
-            out["reason"] = "unsupported_spec_version"
+            out["reason"] = "unsupported_spec_version" if is_dict else "envelope_not_a_json_object"
         return out
