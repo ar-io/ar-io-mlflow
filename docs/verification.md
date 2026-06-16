@@ -6,6 +6,13 @@ installed. For the quickstart and the CLI cheat-sheet, see the
 [README](../README.md#cli); for the design rationale, see
 [`architecture.md`](architecture.md).
 
+> The byte-level checks (JCS canonicalization, SHA-256, Ed25519 verify, the
+> spec-version registry, the profile-conditional `_*` annotation strip) are
+> implemented by the shared
+> [`ar-io-proof`](https://pypi.org/project/ar-io-proof/) kernel; the helpers
+> below are mlflow-shaped wrappers over `verify_envelope`. A non-Python
+> verifier using any RFC 8785 implementation reproduces them.
+
 ## The four checks
 
 Every verification surface — the CLI, the library functions, and the
@@ -206,6 +213,19 @@ tx_id = trace.info.tags["ario.prediction_tx"]   # then verify_proof_by_tx(tx_id,
 > retention policy pruned it, `source_of_truth` reports
 > `reason="live_refetch_incomplete"` rather than silently passing — the
 > signature + anchored-bytes layers remain verifiable regardless.
+
+### Tx-ID routing: pass `tx_id=` out-of-band
+
+`verify_proof_by_tx`, `full_verify`, `verify_record`, and
+`verify_ario_attestation` all accept the Arweave TX ID via the **`tx_id=`
+keyword** rather than via in-place envelope mutation. The kernel does not
+strip `_*` annotation keys from the signed scope of `ario.agent/v1`
+envelopes (only the mlflow profile and pre-`spec_version` legacy envelopes
+get the historical strip), so the legacy `envelope["_tx_id"] = tx_id`
+pattern would now invalidate signatures on cross-product agent envelopes.
+The keyword form is profile-agnostic. Callers that still mutate the
+envelope keep working for mlflow-profile envelopes (the strip is still
+active there) but should migrate to the keyword.
 
 ### Gotcha: `full_verify` / `verify_proof_by_tx` without an MLflow client
 

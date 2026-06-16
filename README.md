@@ -23,7 +23,7 @@ cd ar-io-mlflow
 pip install -e .
 ```
 
-Python 3.10+. MLflow 2.14+ and 3.x both supported (boundary versions 2.14, 2.22, 3.0, 3.12 run in CI). Pulls in MLflow, PyNaCl, the ar.io Turbo SDK, and `cryptography`.
+Python 3.10+. MLflow 2.14+ and 3.x both supported (boundary versions 2.14, 2.22, 3.0, 3.12 run in CI). Pulls in MLflow, PyNaCl, the ar.io Turbo SDK, `cryptography`, and the shared [`ar-io-proof`](https://pypi.org/project/ar-io-proof/) verification kernel (`>=0.2.0` — the byte-level primitives: JCS canonicalization, SHA-256, Ed25519 sign/verify, the spec-version registry).
 
 ### MLflow version compatibility
 
@@ -177,6 +177,45 @@ print(result.tx_id, result.anchor_error)
   finished, the first few predictions chain to `GENESIS` (read once at model
   init; the registration TX never gets re-read on per-prediction calls — this
   avoids races).
+
+#### Agent verify-status gate (runtime tamper detection)
+
+When the model's *deployed* files are watched by the sister
+[`ar-io-agent`](https://github.com/ar-io/ar-io-agent) daemon, pair
+`VerifiedModel` with a `VerifyStatusClient` to consult the agent's verdict
+before loading — `IntegrityError` covers the *registry* artifact; this gate
+covers the *deployed* files the agent watches:
+
+```python
+from ario_mlflow import VerifiedModel, VerifyStatusClient
+
+client = VerifyStatusClient(
+    "http://127.0.0.1:9847",                                 # agent management port (loopback-only)
+    secret=open("/var/lib/ario-agent/management-secret").read().strip(),
+)
+
+model = VerifiedModel(
+    "models:/fraud-detector@production",
+    asset_id="fraud-model",                                  # policy asset_id from the agent
+    verify_status_client=client,
+    on_failure="fail_closed",                                # "raise" | "fail_closed" | "fail_open"
+    recheck_per_predict=True,                                # re-run the gate on every predict()
+    recheck_max_cache_age=15.0,                              # contract §9.2 hot-path cache (10–30s)
+)
+model.predict(X)
+```
+
+The gate maps the §9.1 outcome vocabulary (`verified` / `tampered` /
+`missing` / `unavailable` / `unknown` + transport-level errors) onto the
+typed `AssetVerificationError` family — `IntegrityError` also subclasses it,
+so one `except AssetVerificationError` clause catches both load-time gates.
+`fail_open` logs a structured WARN with a `phase` field (`"load"` /
+`"predict"`) for SIEM routing.
+
+The endpoint is loopback-only by design; the `api_key=` constructor branch
+is a forward-compatibility reservation with no server-side counterpart
+today. Full failure-mode matrix in
+[`docs/verified-model.md`](docs/verified-model.md).
 
 ## Dataset anchoring
 

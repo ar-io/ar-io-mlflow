@@ -25,6 +25,25 @@ raises `IntegrityError` *before* the underlying pyfunc model loads, so a
 swapped model never executes user code. Production deployments should treat
 `IntegrityError` as a security incident.
 
+### T1a — Deployed-file tamper (runtime)
+
+**Scenario.** The model files mounted into the inference container (or any
+other "deployed" copy outside MLflow's artifact store) get rewritten — by an
+attacker who reached the host, a misconfigured deploy pipeline, or an
+honest mistake. T1's artifact re-hash catches the *registry* copy; this is
+about everything else.
+
+**Defense.** Pair `VerifiedModel` with a `VerifyStatusClient` pointed at the
+sister [`ar-io-agent`](https://github.com/ar-io/ar-io-agent) daemon. The
+agent continuously watches the deployed files and anchors signed tamper
+evidence to Arweave; the verify-status gate refuses to load
+(`AssetTamperedError` / `AssetMissingError` / `AssetStaleError` /
+`AssetUnknownError`) when the agent's verdict isn't `verified`+fresh. Pass
+`recheck_per_predict=True` to extend the gate into every `predict()` so a
+tamper detected post-load also refuses inference. `fail_open` exists but
+**logs a structured WARN with `phase`** so SIEM can route — never silently
+bypass. Full mechanics in [`docs/verified-model.md`](verified-model.md).
+
 ### T2 — MLflow tampering after anchoring
 
 **Scenario.** A run's params, metrics, or trace tags are mutated in MLflow

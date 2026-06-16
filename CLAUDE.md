@@ -6,6 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `ar-io-mlflow` is an MLflow plugin (PyPI: `ar-io-mlflow`, import: `ario_mlflow`) that adds verifiable provenance to the MLflow lifecycle. It signs ~500-byte commitments for training, registration, promotion, and prediction events, then anchors them to Arweave via the ar.io Turbo bundler. Source data (params, metrics, artifacts, inputs, outputs) never leaves MLflow — only the SHA-256 commitment goes on chain.
 
+Cryptographic primitives (RFC 8785 JCS canonicalization, SHA-256, Ed25519 sign/verify, the profile-conditional `_*` annotation strip, the spec-version registry) live in the shared **[`ar-io-proof`](https://pypi.org/project/ar-io-proof/)** kernel (PyPI `>=0.2.0`, conformance-gated against `test-vectors-v1.0`). `ario_mlflow.proof` is the plugin's adapter — it owns key persistence (file format, env loading, auto-generate) and preserves the historical `ProofEngine` dict shape for downstream consumers; everything byte-level is the kernel.
+
+Alongside anchoring, the plugin ships a **runtime verify-status gate**: pair `VerifiedModel` with a `VerifyStatusClient` and the gate consults the sister [`ar-io-agent`](https://github.com/ar-io/ar-io-agent) daemon's `GET /v1/verify-status/<asset_id>` endpoint and refuses to load (or, optionally, refuses to `predict()`) when the agent reports the model's covering asset is tampered, missing, stale, or unknown. The endpoint is loopback-only; there is no api-guard proxy form.
+
 `mlflow.db` and `mlruns/` in the repo root are local artifacts from manual experimentation, not canonical state — ignore them when reasoning about the project.
 
 ## Common commands
@@ -42,11 +46,12 @@ There is no separate lint/format step configured in this repo.
 
 **Arweave is a witness; MLflow is the system of record.** The plugin does not put MLflow data on Arweave. It commits a hash so anyone can verify "what's in MLflow now matches what was anchored at time T." Auditor independence is non-negotiable: the proof spec (RFC-8785 JCS + SHA-256 + Ed25519) is reproducible in any language without this plugin.
 
-### Three public integration points (`ario_mlflow/__init__.py`)
+### Four public integration points (`ario_mlflow/__init__.py`)
 
 1. **`anchor()`** (`anchoring.py`) — call inside `mlflow.start_run()` after `log_model()`. **Synchronous**: hashes artifacts, signs the envelope, uploads to Turbo, writes `ario.*` tags. Returns a dict with `envelope`, `payload_hash`, `tags`, `artifact_status`, etc. Raises `ArtifactAccessError` on hashing failure, `WalletLoadError` on bad caller-supplied wallet, `RuntimeError` with no active run.
 2. **`ArioMlflowClient`** (`client.py`) — drop-in `MlflowClient` subclass. `create_model_version()` and `transition_model_version_stage()` return immediately; anchoring runs in a **daemon thread**. Observe via `anchor_status(event_type, name, version)` and `wait_for_anchor(...)`. Anchoring failures never break the underlying MLflow call.
-3. **`VerifiedModel`** (`model.py`) — wraps `models:/...` URI. `__init__` is **synchronous** and re-hashes artifacts against `ario.artifact_hash`, raising `IntegrityError` *before* loading user pyfunc code. `predict()` returns immediately; per-prediction anchoring runs in a daemon thread. Each result exposes `proof_status` / `tx_id` / `wait_for_anchor()`.
+3. **`VerifiedModel`** (`model.py`) — wraps `models:/...` URI. `__init__` is **synchronous** and re-hashes artifacts against `ario.artifact_hash`, raising `IntegrityError` *before* loading user pyfunc code. When `asset_id=` + `verify_status_client=` are passed, the agent verify-status gate runs **first** (one cheap loopback HTTP read) and refuses to load on a tampered/missing/stale/unknown verdict; pass `recheck_per_predict=True` (optionally with `recheck_max_cache_age=`) to re-run the same gate at the top of every `predict()`. `on_failure` controls policy (`raise` / `fail_closed` / `fail_open` — the structured WARN log carries `phase="load"` vs `"predict"` for SIEM routing). `predict()` returns immediately; per-prediction anchoring runs in a daemon thread.
+4. **`VerifyStatusClient`** (`verify_status_client.py`) — consumer for the agent's `GET /v1/verify-status/<asset_id>` endpoint (wire contract: `ar-io-agent/docs/verify-status-api.md`). Construct against the loopback management port (`http://127.0.0.1:9847`, `secret=`) and hand it to `VerifiedModel`. The `api_key=` constructor branch is a forward-compatibility reservation — no server-side counterpart today (the api-guard proxy route was withdrawn before implementation). Branches on HTTP status codes only, opt-in monotonic-clock cache for `outcome+stale`-careful hot paths. The typed `AssetVerificationError` exception family (`errors.py` — `AssetTamperedError` / `AssetMissingError` / `AssetStaleError` / `AssetUnknownError` plus the transport-level `VerifyStatusAuthError` / `VerifyStatusUnknownAssetError` / `VerifyStatusTransportError` / `VerifyStatusLicenseError`) maps `verify-status-api.md` §9.1 verbatim.
 
 Plus standalone dataset anchoring: `anchor(dataset=ds)` mints an independent signed event with no MLflow run required.
 
@@ -62,12 +67,14 @@ When editing chain logic, preserve this asymmetry. Writing the chain head on the
 
 ### Module layout (`ario_mlflow/`)
 
-- `proof.py` — Ed25519 sign/verify, RFC-8785 (JCS) canonicalization via the `jcs` package, SHA-256. The cryptographic core; everything else depends on this.
+- `proof.py` — thin adapter over the `ar-io-proof` kernel: `ProofEngine.create_commitment` delegates to `ario_proof.sign_envelope`, `verify_commitment` to `ario_proof.verify_envelope`. The historical mlflow result dict shape (`signature_valid`, `payload_hash_valid`, `spec_version_status`, `legacy_envelope`, `overall`, `reason`) is preserved for back-compat. Key persistence (file format, env-var loading via `ARIO_MLFLOW_SIGNING_KEY`, auto-generate under `~/.ario-mlflow/keys/`) stays plugin-owned — the kernel deliberately stays out of key lifecycle. Re-exports `canonical_json` / `hash_data` / `normalize_floats` / `SPEC_VERSION` / `ACCEPTED_SPEC_VERSIONS` for callers, all kernel-backed.
 - `anchoring.py` — `anchor()` entry point, artifact-checksum helpers, OTel auto-capture (`ARIO_MLFLOW_CAPTURE_OTEL` opt-out), the `ario.last_training_hash` tag constant, `ArtifactAccessError`.
 - `arweave.py` — `ArweaveAnchor` (Turbo uploads, multi-gateway fetch, `requests.Session` + urllib3 Retry adapter). `WalletLoadError` lives here. Default wallet at `~/.ario-mlflow/wallet.json`. Default fetch gateways: `["turbo-gateway.com", "ardrive.net"]`, override via `ARIO_MLFLOW_GATEWAYS`.
 - `client.py` — `ArioMlflowClient`, daemon-thread anchoring, per-`(event_type, name, version)` status tracking with a `threading.Lock`.
-- `model.py` — `VerifiedModel`, `IntegrityError`, pyfunc loading guarded by an artifact re-hash.
-- `verify.py` — the four verification checks (`verify_signature`, `verify_anchored_bytes`, `verify_source_of_truth`, `verify_ario_attestation`) plus the `full_verify` composite, the auditor-shaped `verify_record`, and operator-side `verify_proof_by_tx`. `ArioVerifyClient` (ar.io Verify REST client with `poll_attestation`) also lives here.
+- `model.py` — `VerifiedModel`, `IntegrityError`, pyfunc loading guarded by an artifact re-hash, optional agent verify-status gate at load and (when `recheck_per_predict=True`) per `predict()`. `_apply_gate_policy` routes the `phase` field into the structured `extra["ario_verify_status"]` log.
+- `verify.py` — the four verification checks (`verify_signature`, `verify_anchored_bytes`, `verify_source_of_truth`, `verify_ario_attestation`) plus the `full_verify` composite, the auditor-shaped `verify_record`, and operator-side `verify_proof_by_tx`. Arweave TX ID routing is **out-of-band**: pass `tx_id=` to `verify_ario_attestation` / `verify_record` / `full_verify` / `verify_proof_by_tx` rather than mutating the envelope (the kernel does not strip `_*` keys for `ario.agent/v1` envelopes, so the legacy in-place mutation pattern would invalidate cross-product signatures). `ArioVerifyClient` (ar.io Verify REST client with `poll_attestation`) also lives here.
+- `verify_status_client.py` — `VerifyStatusClient`, `VerifyStatus` dataclass. Loopback-only management-port consumer; never follows redirects (CVE-class protection — a 3xx from a compromised upstream would otherwise leak the `X-Ario-Management-Secret` header across hosts).
+- `errors.py` — the `AssetVerificationError` exception family. `IntegrityError` (in `model.py`) and every verify-status error subclass it, so one `except AssetVerificationError` clause catches both load-time gates.
 - `cli.py` — `ar-io-mlflow` console-script entry. Renders the three-row verify panel ("Proof Found / Record Matches / Signature Confirmed") plus optional ar.io attestation. Honors `NO_COLOR`.
 - `report.py` — generates `ario/verification.html` as an MLflow artifact on each anchored event.
 - `plugin.py` — MLflow `RunContextProvider` registered via the `mlflow.run_context_provider` entry point in `pyproject.toml`. Importing the package auto-tags every run with `ario.enabled` / `ario.version`.
@@ -78,7 +85,7 @@ Every verify surface runs the same three checks plus an optional fourth:
 
 1. **Proof Found** — fetch the envelope from ar.io for the recorded TX ID.
 2. **{Event} Record Matches** — download `ario/payload.json` from MLflow, re-hash, compare to `payload_hash`, *and* re-derive the canonical bytes from a *separate* MLflow surface (run params/metrics for training, the `ario.payload_json` trace tag for predictions). Both must agree — catches post-anchoring MLflow tampering.
-3. **Signature Confirmed** — Ed25519 verify of the envelope's signature against its embedded `public_key`.
+3. **Signature Confirmed** — Ed25519 verify of the envelope's signature against its embedded `public_key`, via the kernel's `verify_envelope` (the JCS canonicalization, Ed25519 verify, profile-conditional `_*` strip, and spec-version registry all live in `ar-io-proof`). Non-dict / malformed envelope input soft-fails with `spec_version_status="unsupported"` and `reason="envelope_not_a_json_object"` rather than crashing.
 4. **ar.io attestation** *(optional, when `ARIO_MLFLOW_ARIO_VERIFY_URL` is set)* — independent gateway-operator check.
 
 Internal field names (`signature_valid`, `hash_match`, `source_of_truth_ok`, `attestation_level`, `permanent_copy_found`) are stable API — only the printed labels follow the dashboard vocabulary.
@@ -111,6 +118,8 @@ Internal field names (`signature_valid`, `hash_match`, `source_of_truth_ok`, `at
   - `ArioMlflowClient.create_model_version` / `transition_model_version_stage` and `VerifiedModel.predict` return immediately and anchor in daemon threads.
   - Don't change this without updating the README's Performance table.
 - **`last_error` introspection** — when `ArweaveAnchor` or `ArioVerifyClient` methods return `None`, the instance's `last_error` attribute carries the cause. Preserve this when adding new failure paths so callers can distinguish "disabled" from "all retries exhausted."
+- **Kernel discipline.** Byte-level primitives (JCS, SHA-256, Ed25519, the spec-version registry, the profile-conditional `_*` strip) live in `ar-io-proof` — don't re-implement them here, and don't loosen `proof.py`'s adapter to match an old in-tree lenience the kernel rejects (the historical examples: lenient `_*` strip on `ario.agent/v1` envelopes; in-place `_tx_id` mutation; non-dict input crashing rather than soft-failing). When the family contract changes, bump the kernel floor in `pyproject.toml` and `[Unreleased]` rather than forking the kernel into this repo.
+- **Verify-status gate as a defense layer.** The `VerifiedModel(asset_id=…, verify_status_client=…)` gate is the runtime tamper detector for the *deployed* model files, complementing the artifact-hash check on the *registry* copy. `on_failure="fail_open"` exists but logs structured WARN with `phase` (`load` / `predict`) so SIEM pipelines can route — don't silently swallow.
 - **Tests use `tmp_path` + `monkeypatch`** for filesystem and env isolation. No network. No real MLflow server. New tests follow this pattern.
 - **CHANGELOG entries** under `[Unreleased]` for any user-visible change. PR scope: one cohesive theme per PR.
 
@@ -139,6 +148,8 @@ In restricted-egress environments these must be allowlisted. Override the primar
 
 - `README.md` — full API reference, failure modes, env vars, auditor recipe.
 - `docs/architecture.md` — pure-commitment design, JCS canonicalization, evidence chain.
+- `docs/verification.md` — deep reference on the four-check verify flow + the kernel-backed primitives.
+- `docs/verified-model.md` — `VerifiedModel` agent verify-status gate (the load-time and `recheck_per_predict=True` per-call paths, the §9.1 failure-mode matrix, deployment topology).
 - `docs/plugin-production.md` — wallet ops, CI patterns, monitoring.
 - `docs/plugin-threat-model.md` — what the plugin defends against and what it doesn't.
 - `CONTRIBUTING.md` — release process, test patterns, scope boundaries.
