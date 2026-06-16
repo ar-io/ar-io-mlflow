@@ -137,6 +137,36 @@ with the same wallet. That's fine for chain semantics (predictions
 chain to the model version's `ario.registration_tx`, not to each
 other) and avoids cross-replica coordination.
 
+### Agent verify-status gate (runtime tamper detection)
+
+If the model's deployed files are watched by the sister
+[`ar-io-agent`](https://github.com/ar-io/ar-io-agent) daemon, pair
+`VerifiedModel` with a `VerifyStatusClient` so the agent's verdict gates
+load and (optionally) every `predict()`. The gate is **load-time only by
+default**; pass `recheck_per_predict=True` (and `recheck_max_cache_age=`
+for the contract §9.2 hot-path cache) to extend it into the predict path.
+
+Operational shape:
+
+- **Co-locate the model server and the agent** on the same host — the
+  agent's `/v1/verify-status/<asset_id>` endpoint is loopback-only (binds
+  `127.0.0.1:9847` by design). There is no cross-host proxy form.
+- **Provision the management secret** as a file mount from the agent's
+  `<state-dir>/management-secret`, or read it from
+  `ARIO_AGENT_MANAGEMENT_SECRET` if your deployment plumbs it in via env.
+- **Choose `on_failure` deliberately.** `"fail_closed"` is the regulatory
+  default — a tamper / missing / stale verdict refuses inference.
+  `"fail_open"` proceeds **but logs a structured WARN** with
+  `extra["ario_verify_status"]` including `phase` (`load` / `predict`),
+  `asset_id`, `outcome`, `stale`, `policy_hash`, `current_tx_id`. Route
+  that logger to your SIEM; a silent bypass is a regulatory liability.
+- **License gating.** Plans without block enforcement receive a `503` →
+  `VerifyStatusLicenseError` (carries `upgrade_url`). The agent emits the
+  503 based on api-guard entitlement state, fail-open when that state is
+  absent — an unlicensed or offline api-guard never bricks the gate.
+
+Full failure-mode matrix in [`docs/verified-model.md`](verified-model.md).
+
 ## Monitoring and alerting
 
 The plugin doesn't ship monitoring hooks. Wire your own:

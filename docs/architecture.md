@@ -6,6 +6,16 @@
 isn't to put MLflow data on Arweave — it's to commit to a hash that lets
 anyone verify "what's in MLflow now matches what was anchored at time T."
 
+The byte-level primitives — RFC 8785 JCS canonicalization, SHA-256, Ed25519
+sign/verify, the spec-version registry, the profile-conditional `_*`
+annotation strip — live in the shared
+[`ar-io-proof`](https://pypi.org/project/ar-io-proof/) kernel
+(conformance-gated against `test-vectors-v1.0`). `ario_mlflow.proof` is the
+plugin's adapter: `ProofEngine.create_commitment` delegates to
+`ario_proof.sign_envelope`, `verify_commitment` to
+`ario_proof.verify_envelope`. The kernel is the family contract; the plugin
+owns key persistence and the mlflow-shaped result dict on top.
+
 ### Pure-commitment proofs (~500 bytes on Arweave)
 
 Each lifecycle event produces a small signed envelope that goes on Arweave:
